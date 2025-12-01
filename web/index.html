@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Search Engine</title>
+    <style>
+        body { font-family: sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }
+        input { width: 80%; padding: 10px; font-size: 16px; }
+        button { padding: 10px; font-size: 16px; }
+        #results { margin-top: 20px; }
+        .result-item { border: 1px solid #ccc; border-radius: 5px; padding: 15px; margin-bottom: 10px; }
+        .error { color: red; font-weight: bold; }
+        h3 { margin-top: 0; }
+    </style>
+</head>
+<body>
+    <h1>Movie Plot Search</h1>
+    <form id="search-form">
+        <input type="text" id="query-input" placeholder="love">
+        <button type="submit">Search</button>
+    </form>
+    <p><b>Examples:</b> 
+        <code>king death</code> 
+    </p>
+
+    <div id="results"></div>
+
+    <script>
+        document.getElementById('search-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const query = document.getElementById('query-input').value;
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<p>Searching...</p>';
+
+            try {
+                const response = await fetch(`/search?q=${encodeURIComponent(query)}`);
+                const results = await response.json();
+                
+                resultsDiv.innerHTML = ''; 
+                if (results.length === 0) {
+                    resultsDiv.innerHTML = '<p>No results found.</p>';
+                } else if (results[0] && results[0].error) {
+                     resultsDiv.innerHTML = `<p class="error">Error: ${results[0].error}</p>`;
+                } else {
+                    results.forEach(doc => {
+                        const item = document.createElement('div');
+                        item.className = 'result-item';
+                        item.innerHTML = `<h3>${doc.title}</h3><p>${doc.plot_snippet}</p>`;
+                        resultsDiv.appendChild(item);
+                    });
+                }
+            } catch (error) {
+                resultsDiv.innerHTML = `<p class="error">Error: ${error.message}</p>`;
+            }
+        });
+    </script>
+</body>
+</html>
