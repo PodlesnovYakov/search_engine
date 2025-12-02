@@ -9,6 +9,7 @@
 
 SearchEngine::SearchEngine(const Index& index) : index_(index), tokenizer_() {}
 
+
 DocList SearchEngine::search(const std::string& query_str) const {
     if (query_str.empty()) return {};
     auto tokens = tokenize_query(query_str);
@@ -210,68 +211,67 @@ std::vector<uint32_t> SearchEngine::get_doc_ids(const QueryTerm& q_term) const {
     return {};
 }
 
-// ЧЕСТНЫЙ И БЕЗОПАСНЫЙ execute_prox
+// НОВЫЙ EXECUTE_PROX (Самое сложное!)
+// Теперь мы не лезем в positional_index_ (его нет), а берем позиции из PostingsList
 DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm& left_term, const QueryTerm& right_term, const DocList& l_docs, const DocList& r_docs) const {
     size_t slash = op_token.find('/');
     int dist = 1;
-    if (slash != std::string::npos) {
-        try { dist = std::stoi(op_token.substr(slash + 1)); } catch(...) {}
-    }
+    if (slash != std::string::npos) try { dist = std::stoi(op_token.substr(slash + 1)); } catch(...) {}
     bool ordered = (op_token.find("ADJ") == 0);
 
-    const auto& pos_index = index_.get_positional_index();
-    
-    // БЕЗОПАСНАЯ ПРОВЕРКА НАЛИЧИЯ ТЕРМИНОВ
-    auto left_it = pos_index.find(left_term.term);
-    auto right_it = pos_index.find(right_term.term);
-    if (left_it == pos_index.end() || right_it == pos_index.end()) return {};
+    const auto& idx = index_.get_inverted_index();
+    if (!idx.count(left_term.term) || !idx.count(right_term.term)) return {};
 
-    const auto& left_fields_map = left_it->second;
-    const auto& right_fields_map = right_it->second;
+    const auto& l_fields = idx.at(left_term.term);
+    const auto& r_fields = idx.at(right_term.term);
 
     DocList result;
-    // Используем готовые списки документов (пересечение)
     DocList common_docs = execute_intersect_vec_vec(l_docs, r_docs);
 
     for (DocId doc_id : common_docs) {
         bool match = false;
-        std::vector<std::string> fields = {"title", "plot"}; 
+        std::vector<std::string> fields = {"title", "plot"};
         if (left_term.field) fields = {*left_term.field};
 
         for (const auto& field : fields) {
             if (match) break;
             if (right_term.field && *right_term.field != field) continue;
 
-            // БЕЗОПАСНЫЙ ДОСТУП К ПОЛЯМ
-            auto l_map_it = left_fields_map.find(field);
-            auto r_map_it = right_fields_map.find(field);
-            if (l_map_it == left_fields_map.end() || r_map_it == right_fields_map.end()) continue;
+            if (!l_fields.count(field) || !r_fields.count(field)) continue;
 
-            // БЕЗОПАСНЫЙ ДОСТУП К ДОКУМЕНТАМ
-            auto l_pos_it = l_map_it->second.find(doc_id);
-            auto r_pos_it = r_map_it->second.find(doc_id);
-            if (l_pos_it == l_map_it->second.end() || r_pos_it == r_map_it->second.end()) continue;
+            const auto& pl_l = l_fields.at(field);
+            const auto& pl_r = r_fields.at(field);
 
-            const auto& pos_l = l_pos_it->second;
-            const auto& pos_r = r_pos_it->second;
+            // Нам нужно найти индекс этого документа в векторе docs, чтобы достать позиции
+            // Так как docs отсортированы, используем lower_bound (бинарный поиск)
+            auto it_l = std::lower_bound(pl_l.docs.begin(), pl_l.docs.end(), doc_id);
+            auto it_r = std::lower_bound(pl_r.docs.begin(), pl_r.docs.end(), doc_id);
 
-            // ДВА УКАЗАТЕЛЯ (O(N+M))
+            // Проверка, что нашли именно этот документ (он должен быть, так как мы берем из common_docs)
+            if (it_l == pl_l.docs.end() || *it_l != doc_id) continue;
+            if (it_r == pl_r.docs.end() || *it_r != doc_id) continue;
+
+            // Получаем индексы в массиве
+            size_t idx_l = std::distance(pl_l.docs.begin(), it_l);
+            size_t idx_r = std::distance(pl_r.docs.begin(), it_r);
+
+            // Достаем вектора позиций
+            const auto& pos_l = pl_l.positions[idx_l];
+            const auto& pos_r = pl_r.positions[idx_r];
+
+            // Алгоритм сравнения позиций (тот же самый)
             auto pl = pos_l.begin();
             auto pr = pos_r.begin();
-            
             while (pl != pos_l.end() && pr != pos_r.end()) {
                 long long p1 = *pl;
                 long long p2 = *pr;
                 long long diff = p2 - p1;
-
-                if (ordered) { // ADJ
+                if (ordered) {
                     if (diff > 0 && diff <= dist) { match = true; break; }
-                    if (p2 <= p1) ++pr;
-                    else ++pl;
-                } else { // NEAR
+                    if (p2 <= p1) ++pr; else ++pl;
+                } else {
                     if (std::abs(diff) <= dist) { match = true; break; }
-                    if (p1 < p2) ++pl;
-                    else ++pr;
+                    if (p1 < p2) ++pl; else ++pr;
                 }
             }
         }
@@ -279,6 +279,7 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
     }
     return result;
 }
+
 
 DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsList* p2) const {
     if (!p1 || !p2) return {};

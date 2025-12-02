@@ -1,15 +1,18 @@
 #include "Index.h"
-#include <fstream>
 #include <iostream>
-#include <set>       // <--- ДОБАВЛЕНО (исправляет ошибку компиляции)
+#include <algorithm>
 #include <cmath>
-#include <algorithm> // <--- ДОБАВЛЕНО (для sort/unique)
 
-// Хелперы для бинарной записи
-template<typename T> void write_binary(std::ofstream& out, const T& value) { out.write(reinterpret_cast<const char*>(&value), sizeof(T)); }
-template<typename T> void read_binary(std::ifstream& in, T& value) { in.read(reinterpret_cast<char*>(&value), sizeof(T)); }
-void write_string(std::ofstream& out, const std::string& s) { size_t len = s.size(); write_binary(out, len); out.write(s.data(), len); }
-void read_string(std::ifstream& in, std::string& s) { size_t len; read_binary(in, len); s.resize(len); in.read(&s[0], len); }
+// Хелперы для строк (для чисел используем Varint из Common.h)
+void write_string(std::ofstream& out, const std::string& s) { 
+    encode_varint(out, s.size()); 
+    out.write(s.data(), s.size()); 
+}
+void read_string(std::ifstream& in, std::string& s) { 
+    size_t len = decode_varint(in); 
+    s.resize(len); 
+    in.read(&s[0], len); 
+}
 
 void Index::add_document(const Document& doc) {
     documents_[doc.id] = doc;
@@ -20,25 +23,28 @@ void Index::add_document(const Document& doc) {
 void Index::add_field_to_index(DocId doc_id, const std::string& field_name, const std::string& text) {
     auto tokens = tokenizer_.tokenize(text);
     
-    // 1. Инвертированный индекс
-    for (const auto& token : tokens) {
-        inverted_index_[token][field_name].docs.push_back(doc_id);
-    }
-    // 2. Позиционный индекс
+    // Временная мапа для сбора позиций внутри одного документа
+    std::unordered_map<std::string, std::vector<uint32_t>> doc_positions;
     for (size_t i = 0; i < tokens.size(); ++i) {
-        positional_index_[tokens[i]][field_name][doc_id].push_back(static_cast<uint32_t>(i));
+        doc_positions[tokens[i]].push_back(i);
+    }
+
+    // Записываем в основной индекс
+    for (const auto& [term, positions] : doc_positions) {
+        auto& postings = inverted_index_[term][field_name];
+        postings.docs.push_back(doc_id);
+        postings.positions.push_back(positions);
     }
 }
 
 void Index::build_skip_pointers() {
+    // В этой версии мы пишем данные последовательно, они уже отсортированы по DocID,
+    // так как мы добавляем документы по порядку (0, 1, 2...).
+    // Но если бы порядок был нарушен, тут нужна была бы сложная сортировка двух векторов синхронно.
+    // Считаем, что indexer подает документы строго по возрастанию ID.
+
     for (auto& [term, fields] : inverted_index_) {
         for (auto& [field, postings] : fields) {
-            // Сортировка и удаление дубликатов
-            std::sort(postings.docs.begin(), postings.docs.end());
-            auto last = std::unique(postings.docs.begin(), postings.docs.end());
-            postings.docs.erase(last, postings.docs.end());
-
-            // Скипы
             if (postings.docs.size() > 4) {
                 postings.skip_step = static_cast<size_t>(std::sqrt(postings.docs.size()));
                 postings.skips.clear();
@@ -55,51 +61,48 @@ void Index::save(const std::string& filename) const {
     if (!out.is_open()) return;
 
     // 1. Документы
-    size_t doc_count = documents_.size();
-    write_binary(out, doc_count);
+    encode_varint(out, documents_.size());
     for (const auto& [id, doc] : documents_) {
-        write_binary(out, id);
+        encode_varint(out, id);
         write_string(out, doc.title);
         write_string(out, doc.plot);
     }
 
-    // 2. Инвертированный индекс
-    size_t inv_size = inverted_index_.size();
-    write_binary(out, inv_size);
+    // 2. Индекс (СЖАТИЕ!)
+    encode_varint(out, inverted_index_.size());
+    
     for (const auto& [term, fields_map] : inverted_index_) {
         write_string(out, term);
-        size_t fields_count = fields_map.size();
-        write_binary(out, fields_count);
+        encode_varint(out, fields_map.size());
+        
         for (const auto& [field, postings] : fields_map) {
             write_string(out, field);
-            size_t docs_size = postings.docs.size();
-            write_binary(out, docs_size);
-            out.write(reinterpret_cast<const char*>(postings.docs.data()), docs_size * sizeof(DocId));
             
-            size_t skips_size = postings.skips.size();
-            write_binary(out, skips_size);
-            if (skips_size > 0) out.write(reinterpret_cast<const char*>(postings.skips.data()), skips_size * sizeof(size_t));
-            write_binary(out, postings.skip_step);
-        }
-    }
-
-    // 3. Позиционный индекс
-    size_t pos_size = positional_index_.size();
-    write_binary(out, pos_size);
-    for (const auto& [term, fields_map] : positional_index_) {
-        write_string(out, term);
-        size_t fields_count = fields_map.size();
-        write_binary(out, fields_count);
-        for (const auto& [field, doc_map] : fields_map) {
-            write_string(out, field);
-            size_t map_size = doc_map.size();
-            write_binary(out, map_size);
-            for (const auto& [docid, positions] : doc_map) {
-                write_binary(out, docid);
-                size_t pos_count = positions.size();
-                write_binary(out, pos_count);
-                out.write(reinterpret_cast<const char*>(positions.data()), pos_count * sizeof(uint32_t));
+            // А. Сохраняем DocID с Delta Encoding
+            size_t count = postings.docs.size();
+            encode_varint(out, count);
+            
+            DocId prev_doc = 0;
+            for (DocId doc : postings.docs) {
+                encode_varint(out, doc - prev_doc); // Пишем разницу!
+                prev_doc = doc;
             }
+
+            // Б. Сохраняем Позиции с Delta Encoding
+            // (размер массива позиций равен размеру массива документов)
+            for (const auto& pos_vec : postings.positions) {
+                encode_varint(out, pos_vec.size());
+                uint32_t prev_pos = 0;
+                for (uint32_t pos : pos_vec) {
+                    encode_varint(out, pos - prev_pos); // Пишем разницу!
+                    prev_pos = pos;
+                }
+            }
+
+            // В. Скипы (их можно не сжимать, их мало, или тоже дельтой)
+            encode_varint(out, postings.skips.size());
+            for (size_t skip : postings.skips) encode_varint(out, skip);
+            encode_varint(out, postings.skip_step);
         }
     }
 }
@@ -109,69 +112,57 @@ void Index::load(const std::string& filename) {
     if (!in.is_open()) throw std::runtime_error("Cannot open index file");
 
     // 1. Документы
-    size_t doc_count;
-    read_binary(in, doc_count);
+    size_t doc_count = decode_varint(in);
     for (size_t i = 0; i < doc_count; ++i) {
         Document doc;
-        read_binary(in, doc.id);
+        doc.id = decode_varint(in);
         read_string(in, doc.title);
         read_string(in, doc.plot);
         documents_[doc.id] = doc;
     }
 
-    // 2. Инвертированный индекс
-    size_t inv_size;
-    read_binary(in, inv_size);
+    // 2. Индекс
+    size_t inv_size = decode_varint(in);
     for (size_t i = 0; i < inv_size; ++i) {
         Term term;
         read_string(in, term);
-        size_t fields_count;
-        read_binary(in, fields_count);
+        size_t fields_count = decode_varint(in);
+        
         for (size_t j = 0; j < fields_count; ++j) {
             std::string field;
             read_string(in, field);
             PostingsList postings;
             
-            size_t docs_size;
-            read_binary(in, docs_size);
-            postings.docs.resize(docs_size);
-            in.read(reinterpret_cast<char*>(postings.docs.data()), docs_size * sizeof(DocId));
-            
-            size_t skips_size;
-            read_binary(in, skips_size);
-            if (skips_size > 0) {
-                postings.skips.resize(skips_size);
-                in.read(reinterpret_cast<char*>(postings.skips.data()), skips_size * sizeof(size_t));
+            // А. Читаем Docs (Delta Decoding)
+            size_t count = decode_varint(in);
+            postings.docs.resize(count);
+            DocId prev_doc = 0;
+            for (size_t k = 0; k < count; ++k) {
+                DocId delta = decode_varint(in);
+                postings.docs[k] = prev_doc + delta;
+                prev_doc = postings.docs[k];
             }
-            read_binary(in, postings.skip_step);
-            inverted_index_[term][field] = std::move(postings);
-        }
-    }
 
-    // 3. Позиционный индекс
-    if (in.peek() == EOF) return;
-    size_t pos_size;
-    read_binary(in, pos_size);
-    for (size_t i = 0; i < pos_size; ++i) {
-        Term term;
-        read_string(in, term);
-        size_t fields_count;
-        read_binary(in, fields_count);
-        for (size_t j = 0; j < fields_count; ++j) {
-            std::string field;
-            read_string(in, field);
-            size_t map_size;
-            read_binary(in, map_size);
-            auto& doc_map = positional_index_[term][field];
-            for (size_t k = 0; k < map_size; ++k) {
-                DocId docid;
-                read_binary(in, docid);
-                size_t vec_size;
-                read_binary(in, vec_size);
-                std::vector<uint32_t> positions(vec_size);
-                in.read(reinterpret_cast<char*>(positions.data()), vec_size * sizeof(uint32_t));
-                doc_map[docid] = std::move(positions);
+            // Б. Читаем Позиции (Delta Decoding)
+            postings.positions.resize(count);
+            for (size_t k = 0; k < count; ++k) {
+                size_t pos_count = decode_varint(in);
+                postings.positions[k].resize(pos_count);
+                uint32_t prev_pos = 0;
+                for (size_t p = 0; p < pos_count; ++p) {
+                    uint32_t delta = decode_varint(in);
+                    postings.positions[k][p] = prev_pos + delta;
+                    prev_pos = postings.positions[k][p];
+                }
             }
+
+            // В. Скипы
+            size_t skips_size = decode_varint(in);
+            postings.skips.resize(skips_size);
+            for(size_t k=0; k<skips_size; ++k) postings.skips[k] = decode_varint(in);
+            postings.skip_step = decode_varint(in);
+
+            inverted_index_[term][field] = std::move(postings);
         }
     }
 }
