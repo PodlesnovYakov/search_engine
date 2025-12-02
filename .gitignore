@@ -50,3 +50,4 @@ CppProperties.json
 .vs/
 .DS_Store
 .mypy_cache/
+index.bin

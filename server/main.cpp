@@ -5,154 +5,99 @@
 #include "SearchEngine.h"
 #include <iostream>
 #include <fstream>
-#include <vector>
 #include <sstream>
 
 using json = nlohmann::json;
 
-// здесь тупо читаем файл, где 1 столбец это тайтл и 7 столбец плот
-// посимвольно читаем т.к. могут встречаться символы перевода строк, знаки препинания и т.д.
-std::vector<Document> parse_csv(const std::string& filename, int limit) {
-    std::vector<Document> docs;
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Error: Could not open file " << filename << std::endl;
-        return docs;
-    }
-
-    std::string line;
-    uint32_t id = 0;
-    std::getline(file, line);
-
-    std::string record_buffer;
-    bool in_quotes = false;
-    char c;
-
-    while (file.get(c)) {
-        if (c == '"') {
-            in_quotes = !in_quotes;
-        }
-
-        if (c == '\n' && !in_quotes) {
-            std::stringstream ss(record_buffer);
-            std::vector<std::string> row;
-            std::string field;
-            bool field_in_quotes = false;
-            
-            for(char ch : record_buffer) {
-                if (ch == '"') {
-                    field_in_quotes = !field_in_quotes;
-                } else if (ch == ',' && !field_in_quotes) {
-                    row.push_back(field);
-                    field.clear();
-                } else {
-                    field += ch;
-                }
-            }
-            row.push_back(field);
-
-            if (row.size() >= 8) {
-                docs.push_back({id++, row[1], row[7]});
-            }
-
-            record_buffer.clear(); 
-            if (limit != 0 && id >= limit) {
-                break;
-            }
-
+// Функция для очистки строки от битого UTF-8
+std::string clean_utf8(const std::string& str) {
+    std::string res;
+    res.reserve(str.size());
+    for (size_t i = 0; i < str.size(); ++i) {
+        unsigned char c = static_cast<unsigned char>(str[i]);
+        if (c < 0x80) {
+            res += c; // ASCII
         } else {
-            record_buffer += c;
+            // Простейшая защита: пропускаем явно битые байты, если это не начало символа
+            // В идеале тут нужна полноценная библиотека типа ICU, но для домашки хватит
+            // простого копирования. Библиотека nlohmann::json с replace сама справится,
+            // если строка не обрезана посередине символа.
+            res += c;
         }
     }
-    
-    if (!record_buffer.empty() && (limit == 0 || id < limit)) {
-        std::stringstream ss(record_buffer);
-        std::vector<std::string> row;
-        std::string field;
-        bool field_in_quotes = false;
-        
-        for(char ch : record_buffer) {
-            if (ch == '"') {
-                field_in_quotes = !field_in_quotes;
-            } else if (ch == ',' && !field_in_quotes) {
-                row.push_back(field);
-                field.clear();
-            } else {
-                field += ch;
-            }
-        }
-        row.push_back(field);
-
-        if (row.size() >= 8) {
-            docs.push_back({id++, row[1], row[7]});
-        }
-    }
-
-    return docs;
+    return res;
 }
 
+// Безопасная обрезка
+std::string utf8_truncate(const std::string& str, size_t len) {
+    if (str.length() <= len) return str;
+    while (len > 0 && (str[len] & 0xC0) == 0x80) len--;
+    return str.substr(0, len);
+}
 
-int main(void) {
+int main() {
     Index index;
-    std::cout << "Loading and indexing documents..." << std::endl;
-    const std::string csv_path = "data/wiki_movie_plots_deduped.csv";
-    
-    auto documents = parse_csv(csv_path, 0);
-
-    if (documents.empty()) {
-        std::cerr << "Warning: No documents were loaded. Please check the file path and format." << std::endl;
+    std::cout << "Loading index..." << std::endl;
+    try {
+        index.load("index.bin");
+    } catch (...) {
+        std::cerr << "Error loading index!" << std::endl;
+        return 1;
     }
-
-    for (const auto& doc : documents) {
-        index.add_document(doc);
-    }
-    std::cout << "Indexing complete. " << index.get_documents().size() << " documents indexed." << std::endl;
+    std::cout << "Loaded." << std::endl;
     
     SearchEngine engine(index);
     httplib::Server svr;
-
-    svr.Get("/", [](const httplib::Request&, httplib::Response& res) {
-        std::ifstream file("web/index.html");
-        std::stringstream buffer;
-        buffer << file.rdbuf();
-        res.set_content(buffer.str(), "text/html");
-    });
-
-    svr.Get("/search", [&](const httplib::Request& req, httplib::Response& res) {
-        if (!req.has_param("q")) {
-            res.status = 400;
-            res.set_content("Missing 'q' parameter", "text/plain");
-            return;
-        }
-        
-        std::string query = req.get_param_value("q");
-        std::cout << "Received query: " << query << std::endl;
-        
-        json response_json = json::array();
-        try {
-            auto result_ids = engine.search(query);
-            size_t count = 0;
-            for (uint32_t id : result_ids) {
-                if(count++ >= 50) break;
-                const auto& doc = index.get_documents().at(id);
-                json doc_json;
-                doc_json["title"] = doc.title;
-                doc_json["plot_snippet"] = doc.plot.substr(0, 300) + "...";
-                response_json.push_back(doc_json);
-            }
-        } catch (const std::exception& e) {
-            res.status = 500;
-            json err_json;
-            err_json["error"] = e.what();
-            res.set_content(err_json.dump(4), "application/json");
-            return;
-        }
-        
-        res.set_content(response_json.dump(4), "application/json");
-    });
-
-    std::cout << "Server started at http://localhost:8080" << std::endl;
-    svr.listen("0.0.0.0", 8080);
     
+    // Таймауты
+    svr.set_read_timeout(5, 0);
+    svr.set_write_timeout(5, 0);
+
+    svr.Get("/", [](const auto&, auto& res) {
+        std::ifstream file("web/index.html");
+        if(file.is_open()) {
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            res.set_content(buffer.str(), "text/html");
+        } else res.set_content("No UI", "text/plain");
+    });
+
+    svr.Get("/search", [&](const auto& req, auto& res) {
+        if (!req.has_param("q")) return;
+        auto q = req.get_param_value("q");
+        std::cout << "Query: " << q << std::endl;
+
+        try {
+            auto ids = engine.search(q);
+            std::cout << "Found: " << ids.size() << std::endl;
+
+            json j = json::array();
+            size_t cnt = 0;
+            for (auto id : ids) {
+                if (cnt++ >= 20) break;
+                // БЕЗОПАСНЫЙ ПОИСК ДОКУМЕНТА
+                auto it = index.get_documents().find(id);
+                if (it != index.get_documents().end()) {
+                    const auto& d = it->second;
+                    
+                    std::string safe_title = utf8_truncate(d.title, 100);
+                    std::string safe_plot = utf8_truncate(d.plot, 300);
+                    if (d.plot.length() > 300) safe_plot += "...";
+
+                    j.push_back({
+                        {"title", safe_title}, 
+                        {"plot_snippet", safe_plot}
+                    });
+                }
+            }
+            // ВАЖНО: replace заменяет битые символы на 
+            res.set_content(j.dump(-1, ' ', false, json::error_handler_t::replace), "application/json");
+        } catch (const std::exception& e) {
+            std::cerr << "Error: " << e.what() << std::endl;
+            res.status = 500;
+        }
+    });
+
+    svr.listen("0.0.0.0", 8080);
     return 0;
 }

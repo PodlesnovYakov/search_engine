@@ -1,37 +1,47 @@
 #pragma once
-#include "Index.h" 
-#include <string>
-#include <vector>
+#include "Index.h"
+#include "Tokenizer.h"
+#include "Common.h"
 #include <optional>
 #include <variant>
 
 class SearchEngine {
 public:
     explicit SearchEngine(const Index& index);
-    std::vector<uint32_t> search(const std::string& query_str) const;
+    DocList search(const std::string& query_str) const;
 
-private:
+    // --- ИСПРАВЛЕНИЕ: Переместили в public, чтобы StackItem мог это видеть ---
     struct QueryTerm {
-        std::string term;
+        Term term;
         std::optional<std::string> field;
     };
+    // -----------------------------------------------------------------------
 
-    std::vector<std::string> tokenize_query(const std::string& s) const;
-    std::vector<std::string> insert_implicit_and(const std::vector<std::string>& tokens) const;
-    std::vector<std::string> to_rpn(const std::vector<std::string>& tokens) const;
-    std::vector<uint32_t> evaluate_rpn(const std::vector<std::string>& rpn) const;
+private:
+    Tokens tokenize_query(const std::string& s) const;
+    Tokens insert_implicit_and(const Tokens& tokens) const;
+    Tokens to_rpn(const Tokens& tokens) const;
+    DocList evaluate_rpn(const Tokens& rpn) const;
 
-    std::vector<uint32_t> get_doc_ids(const QueryTerm& q_term) const;
-    std::vector<uint32_t> execute_intersect(const std::vector<uint32_t>& list1, const std::vector<uint32_t>& list2) const;
+    // ВАЖНО: Возвращаем указатель на данные
+    const PostingsList* get_postings(const QueryTerm& q_term) const;
+    DocList get_doc_ids(const QueryTerm& q_term) const;
+
+    // ОПТИМИЗИРОВАННОЕ ПЕРЕСЕЧЕНИЕ (Skip Pointers)
+    DocList execute_intersect(const PostingsList* left, const PostingsList* right) const;
+    DocList execute_intersect_vec(const DocList& left, const PostingsList* right) const;
+    DocList execute_intersect_vec_vec(const DocList& left, const DocList& right) const;
+
+    DocList execute_union(const DocList& a, const DocList& b) const;
+    DocList execute_not(const DocList& operand) const;
     
-    std::vector<uint32_t> execute_union(const std::vector<uint32_t>& a, const std::vector<uint32_t>& b) const;
-    std::vector<uint32_t> execute_not(const std::vector<uint32_t>& operand) const;
-    std::vector<uint32_t> execute_prox(const std::string& op_token, const std::string& left_token, const std::string& right_token) const;
+    // НАСТОЯЩИЙ NEAR/ADJ
+    DocList execute_prox(const std::string& op_token, const QueryTerm& left, const QueryTerm& right, const DocList& l_docs, const DocList& r_docs) const;
 
     QueryTerm parse_query_token(const std::string& token) const;
     static bool is_operator(const std::string& token);
     static bool is_term_like(const std::string& token);
 
     const Index& index_;
-    Tokenizer tokenizer_; 
+    Tokenizer tokenizer_;
 };

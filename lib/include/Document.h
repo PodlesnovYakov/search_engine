@@ -1,9 +1,8 @@
 #pragma once
-#include <string>
-#include <cstdint>
+#include "Common.h"
 
 struct Document {
-    uint32_t id;
+    DocId id;
     std::string title;
     std::string plot;
 };
