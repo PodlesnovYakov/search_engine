@@ -3,9 +3,13 @@
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <stdexcept>
+#include <iostream>
 
-// --- Varint (числа переменной длины) ---
-inline void write_varint(std::ofstream& out, uint32_t value) {
+// Лимит 200 МБ на вектор (защита от мусора)
+const size_t MAX_BLOCK_SIZE = 200 * 1024 * 1024; 
+
+inline void write_varint(std::ofstream& out, uint64_t value) {
     while (value >= 128) {
         out.put(static_cast<char>((value & 0x7F) | 0x80));
         value >>= 7;
@@ -13,19 +17,19 @@ inline void write_varint(std::ofstream& out, uint32_t value) {
     out.put(static_cast<char>(value));
 }
 
-inline uint32_t read_varint(std::ifstream& in) {
-    uint32_t value = 0;
+inline uint64_t read_varint(std::ifstream& in) {
+    uint64_t value = 0;
     int shift = 0;
     char byte;
     while (in.get(byte)) {
-        value |= (static_cast<uint32_t>(byte & 0x7F) << shift);
+        value |= (static_cast<uint64_t>(byte & 0x7F) << shift);
         if ((byte & 0x80) == 0) break;
         shift += 7;
+        if (shift > 63) throw std::runtime_error("Varint corrupted");
     }
     return value;
 }
 
-// --- Строки ---
 inline void write_string(std::ofstream& out, const std::string& s) {
     write_varint(out, s.size());
     out.write(s.data(), s.size());
@@ -33,28 +37,29 @@ inline void write_string(std::ofstream& out, const std::string& s) {
 
 inline void read_string(std::ifstream& in, std::string& s) {
     size_t len = read_varint(in);
+    if (len > MAX_BLOCK_SIZE) throw std::runtime_error("String too long");
     s.resize(len);
-    in.read(&s[0], len);
+    if (len > 0) in.read(&s[0], len);
 }
 
-// --- Delta Encoding (для списков) ---
+// --- ТЕПЕРЬ ЭТО ПРОСТО СЖАТЫЙ ВЕКТОР (БЕЗ ДЕЛЬТЫ) ---
+// Мы убрали вычитание (val - prev), чтобы избежать переполнений.
 inline void write_delta_vector(std::ofstream& out, const std::vector<uint32_t>& vec) {
     write_varint(out, vec.size());
-    uint32_t prev = 0;
     for (uint32_t val : vec) {
-        write_varint(out, val - prev);
-        prev = val;
+        write_varint(out, static_cast<uint64_t>(val));
     }
 }
 
 inline std::vector<uint32_t> read_delta_vector(std::ifstream& in) {
     size_t size = read_varint(in);
-    std::vector<uint32_t> vec(size);
-    uint32_t prev = 0;
+    if (size > MAX_BLOCK_SIZE) throw std::runtime_error("Vector too large");
+    
+    std::vector<uint32_t> vec;
+    vec.reserve(size);
     for (size_t i = 0; i < size; ++i) {
-        uint32_t delta = read_varint(in);
-        vec[i] = prev + delta;
-        prev = vec[i];
+        uint64_t val = read_varint(in);
+        vec.push_back(static_cast<uint32_t>(val));
     }
     return vec;
 }

@@ -8,8 +8,7 @@
 class SearchEngine {
 public:
     explicit SearchEngine(const Index& index);
-    DocList search(const std::string& query_str) const;
-
+    DocList search(const std::string& query_str, double k1 = 1.2, double b = 0.75) const;
     // --- ИСПРАВЛЕНИЕ: Переместили в public, чтобы StackItem мог это видеть ---
     struct QueryTerm {
         Term term;

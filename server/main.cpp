@@ -9,7 +9,6 @@
 
 using json = nlohmann::json;
 
-// Безопасная обрезка UTF-8
 std::string utf8_truncate(const std::string& str, size_t len) {
     if (str.length() <= len) return str;
     while (len > 0 && (str[len] & 0xC0) == 0x80) len--;
@@ -20,21 +19,21 @@ int main() {
     Index index;
     std::cout << "Loading index..." << std::endl;
     try {
-        // ВАЖНО: Грузим "index" (он сам найдет .docs и .inv)
         index.load("index");
     } catch (const std::exception& e) {
         std::cerr << "Error loading index: " << e.what() << std::endl;
-        std::cerr << "Run './indexer' first!" << std::endl;
         return 1;
     }
     
-    // Получаем доступ к прямому индексу для статистики
+    // --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+    // Используем get_forward_index() вместо get_documents()
     const auto& forward_index = index.get_forward_index();
-    std::cout << "Index loaded! Documents: " << forward_index.size() << std::endl;
-    
+    std::cout << "Loaded " << forward_index.size() << " documents." << std::endl;
+    // -------------------------
+
     SearchEngine engine(index);
     httplib::Server svr;
-
+    
     svr.set_read_timeout(5, 0);
     svr.set_write_timeout(5, 0);
 
@@ -44,53 +43,52 @@ int main() {
             std::stringstream buffer;
             buffer << file.rdbuf();
             res.set_content(buffer.str(), "text/html");
-        } else {
-            res.set_content("No UI found", "text/plain");
-        }
+        } else res.set_content("No UI", "text/plain");
     });
 
     svr.Get("/search", [&](const auto& req, auto& res) {
         if (!req.has_param("q")) return;
         
         std::string query = req.get_param_value("q");
-        std::cout << "Query: " << query << std::endl;
+        
+        double k1 = 1.2;
+        double b = 0.75;
+        if (req.has_param("k1")) try { k1 = std::stod(req.get_param_value("k1")); } catch(...) {}
+        if (req.has_param("b")) try { b = std::stod(req.get_param_value("b")); } catch(...) {}
 
         try {
-            // 1. Поиск и ранжирование
-            auto ids = engine.search(query);
-            std::cout << "Found: " << ids.size() << std::endl;
-
+            auto ids = engine.search(query, k1, b);
+            
             json j = json::array();
             size_t cnt = 0;
-            
             for (auto id : ids) {
                 if (cnt++ >= 20) break;
                 
-                // ВАЖНО: Используем Forward Index (Прямой индекс)
-                // Это O(1) доступ вместо O(log N) в мапе
+                // --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+                // Берем документ из прямого индекса
                 if (id < forward_index.size()) {
                     const auto& d = forward_index.get_document(id);
                     
-                    std::string safe_title = utf8_truncate(d.title, 100);
-                    std::string safe_plot = utf8_truncate(d.plot, 300);
-                    if (d.plot.length() > 300) safe_plot += "...";
-
+                    std::string snip = utf8_truncate(d.plot, 300);
+                    if (d.plot.length() > 300) snip += "...";
+                    
                     j.push_back({
-                        {"title", safe_title}, 
-                        {"plot_snippet", safe_plot}
+                        {"id", id},
+                        {"title", d.title}, 
+                        {"plot_snippet", snip}
                     });
                 }
+                // -------------------------
             }
             res.set_content(j.dump(-1, ' ', false, json::error_handler_t::replace), "application/json");
-
         } catch (const std::exception& e) {
             std::cerr << "Error: " << e.what() << std::endl;
             res.status = 500;
-            res.set_content(R"({"error": "Internal Server Error"})", "application/json");
         }
     });
 
-    std::cout << "Server started at http://localhost:8080" << std::endl;
+    std::cout << "Server started at http://localhost:8080" << std::endl; //
     svr.listen("0.0.0.0", 8080);
     return 0;
 }
+

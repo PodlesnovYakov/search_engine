@@ -1,8 +1,9 @@
 #include "Index.h"
-#include "Encoding.h" // <-- Наши функции сжатия
+#include "Encoding.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <iostream>
 
 void Index::add_document(const Document& doc) {
     forward_index_.add_document(doc);
@@ -12,9 +13,8 @@ void Index::add_document(const Document& doc) {
 
 void Index::add_field_to_index(DocId doc_id, const std::string& field_name, const std::string& text) {
     auto tokens = tokenizer_.tokenize(text);
-    
-    // Группируем позиции по словам
     std::map<std::string, std::vector<uint32_t>> term_positions;
+    
     for (size_t i = 0; i < tokens.size(); ++i) {
         term_positions[tokens[i]].push_back(i);
     }
@@ -22,14 +22,16 @@ void Index::add_field_to_index(DocId doc_id, const std::string& field_name, cons
     for (const auto& [term, positions] : term_positions) {
         auto& list = inverted_index_[term][field_name];
         list.docs.push_back(doc_id);
-        list.positions.push_back(positions); // Сохраняем позиции
+        list.positions.push_back(positions);
     }
 }
 
 void Index::build_skip_pointers() {
     for (auto& [term, fields] : inverted_index_) {
         for (auto& [field, postings] : fields) {
-            // Docs уже отсортированы (добавляем по порядку), просто строим скипы
+            // Мы доверяем порядку добавления (doc_id растут).
+            // Сортировать не будем, чтобы не сломать связь с positions.
+            
             if (postings.docs.size() > 4) {
                 postings.skip_step = static_cast<size_t>(std::sqrt(postings.docs.size()));
                 postings.skips.clear();
@@ -42,9 +44,10 @@ void Index::build_skip_pointers() {
 }
 
 void Index::save(const std::string& base_name) const {
-    forward_index_.save(base_name + ".docs"); // Прямой индекс
+    forward_index_.save(base_name + ".docs");
 
     std::ofstream out(base_name + ".inv", std::ios::binary);
+    write_varint(out, 0xCAFEBABE);
     write_varint(out, inverted_index_.size());
     
     for (const auto& [term, fields_map] : inverted_index_) {
@@ -54,27 +57,35 @@ void Index::save(const std::string& base_name) const {
         for (const auto& [field, postings] : fields_map) {
             write_string(out, field);
             
-            // Сжимаем документы (Delta)
+            if (postings.docs.size() != postings.positions.size()) {
+                std::cerr << "CRITICAL: Size mismatch for " << term << std::endl;
+            }
+
             write_delta_vector(out, postings.docs);
 
-            // Сжимаем позиции (Delta)
             write_varint(out, postings.positions.size());
             for (const auto& pos_vec : postings.positions) {
                 write_delta_vector(out, pos_vec);
             }
 
-            // Скипы
-            write_delta_vector(out, std::vector<uint32_t>(postings.skips.begin(), postings.skips.end()));
+            std::vector<uint32_t> skip_vec;
+            for(auto s : postings.skips) skip_vec.push_back(static_cast<uint32_t>(s));
+            write_delta_vector(out, skip_vec);
+            
             write_varint(out, postings.skip_step);
         }
     }
+    write_varint(out, 0xDEADBEEF);
 }
 
 void Index::load(const std::string& base_name) {
+    inverted_index_.clear();
     forward_index_.load(base_name + ".docs");
 
     std::ifstream in(base_name + ".inv", std::ios::binary);
     if (!in.is_open()) throw std::runtime_error("Cannot open .inv file");
+
+    if (read_varint(in) != 0xCAFEBABE) throw std::runtime_error("Invalid magic header");
 
     size_t inv_size = read_varint(in);
     for (size_t i = 0; i < inv_size; ++i) {
@@ -96,12 +107,15 @@ void Index::load(const std::string& base_name) {
             }
 
             auto skips_vec = read_delta_vector(in);
-            postings.skips.assign(skips_vec.begin(), skips_vec.end());
+            postings.skips.reserve(skips_vec.size());
+            for(auto s : skips_vec) postings.skips.push_back(s);
+            
             postings.skip_step = read_varint(in);
 
             inverted_index_[term][field] = std::move(postings);
         }
     }
+    if (read_varint(in) != 0xDEADBEEF) throw std::runtime_error("Invalid magic footer");
 }
 
 /*

@@ -2,8 +2,8 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <cstdio> // remove
 
-// Парсер CSV (тот самый, надежный)
 std::vector<Document> parse_csv(const std::string& filename) {
     std::vector<Document> docs;
     std::ifstream file(filename);
@@ -36,7 +36,7 @@ std::vector<Document> parse_csv(const std::string& filename) {
             record_buffer += c;
         }
     }
-    // Обработка хвоста
+    // Хвост
     if (!record_buffer.empty()) {
          std::stringstream ss(record_buffer);
             std::vector<std::string> row;
@@ -56,19 +56,26 @@ std::vector<Document> parse_csv(const std::string& filename) {
 int main(int argc, char* argv[]) {
     std::cout << "Parsing CSV..." << std::endl;
     auto docs = parse_csv("data/wiki_movie_plots_deduped.csv");
-    Index index;
     
+    Index index;
     std::cout << "Indexing " << docs.size() << " docs..." << std::endl;
     for (const auto& doc : docs) index.add_document(doc);
     
-    std::cout << "Building Skip Pointers..." << std::endl;
+    std::cout << "Building Skip Pointers & Sorting..." << std::endl;
     index.build_skip_pointers();
 
-    std::cout << "Saving..." << std::endl;
-    // ВАЖНО: Просто "index", без расширения .bin
-    // Класс сам создаст index.docs и index.inv
-    index.save("index"); 
+    std::cout << "Saving index..." << std::endl;
     
-    std::cout << "Done." << std::endl;
+    // Удаляем старые файлы, чтобы не было конфликтов
+    std::remove("index.docs");
+    std::remove("index.inv");
+
+    try {
+        index.save("index");
+        std::cout << "Done. Index saved successfully." << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "FATAL ERROR SAVING INDEX: " << e.what() << std::endl;
+        return 1;
+    }
     return 0;
 }

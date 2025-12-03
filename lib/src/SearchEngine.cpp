@@ -6,12 +6,19 @@
 #include <iterator>
 #include <sstream>
 #include <cmath>
-#include <map> // <--- ДОБАВЛЕНО (Лечит ошибку 'map' does not name a type)
+#include <map>
 #include <iostream>
+#include <cctype> // Для toupper
 
 SearchEngine::SearchEngine(const Index& index) : index_(index), tokenizer_() {}
 
-DocList SearchEngine::search(const std::string& query_str) const {
+// Вспомогательная функция: "строку В ВЕРХНИЙ РЕГИСТР"
+std::string to_upper(std::string s) {
+    for (char& c : s) c = std::toupper(static_cast<unsigned char>(c));
+    return s;
+}
+
+DocList SearchEngine::search(const std::string& query_str, double k1, double b) const {
     if (query_str.empty()) return {};
     auto tokens = tokenize_query(query_str);
     if (tokens.empty()) return {};
@@ -28,15 +35,14 @@ DocList SearchEngine::search(const std::string& query_str) const {
     }
 
     processed = insert_implicit_and(processed);
-    
-    // 1. Получаем кандидатов
     DocList results = evaluate_rpn(to_rpn(processed));
 
-    // 2. РАНЖИРОВАНИЕ BM25
     if (results.empty()) return {};
     
+    // РАНЖИРОВАНИЕ
     Tokens scoring_terms;
     for(const auto& t : tokens) {
+        // Используем проверку, не является ли слово оператором (в любом регистре)
         if (is_term_like(t)) {
             auto qt = parse_query_token(t);
             if (!qt.term.empty()) scoring_terms.push_back(qt.term);
@@ -45,7 +51,7 @@ DocList SearchEngine::search(const std::string& query_str) const {
 
     Ranker ranker(index_);
     std::sort(results.begin(), results.end(), [&](DocId a, DocId b) {
-        return ranker.score(a, scoring_terms) > ranker.score(b, scoring_terms);
+        return ranker.score(a, scoring_terms, k1, b) > ranker.score(b, scoring_terms, k1, b);
     });
     
     return results;
@@ -55,7 +61,6 @@ Tokens SearchEngine::tokenize_query(const std::string& s) const {
     Tokens tokens;
     std::string buf;
     for (char ch : s) {
-        // Добавил ':' в разделители
         if (ch == '(' || ch == ')' || ch == ':' || std::isspace(ch)) {
             if (!buf.empty()) { tokens.push_back(buf); buf.clear(); }
             if (!std::isspace(ch)) { tokens.push_back(std::string(1, ch)); }
@@ -72,6 +77,7 @@ Tokens SearchEngine::insert_implicit_and(const Tokens& tokens) const {
     for (size_t i = 0; i < tokens.size(); ++i) {
         result.push_back(tokens[i]);
         if (i + 1 < tokens.size()) {
+            // Вставляем AND только если оба соседа - НЕ операторы
             if (is_term_like(tokens[i]) && is_term_like(tokens[i+1]) && tokens[i].back() != ':') {
                 result.push_back("AND");
             }
@@ -84,16 +90,22 @@ Tokens SearchEngine::to_rpn(const Tokens& tokens) const {
     Tokens rpn;
     std::stack<std::string> op_stack;
     const std::map<std::string, int> precedence = {{"OR", 1}, {"AND", 2}, {"NEAR", 3}, {"ADJ", 3}, {"NOT", 4}};
-    auto get_prec = [&](const std::string& op) { return precedence.count(op.substr(0, op.find('/'))) ? precedence.at(op.substr(0, op.find('/'))) : 0; };
+    
+    auto get_prec = [&](const std::string& op) { 
+        // Берем приоритет по верхнему регистру
+        std::string upper_op = to_upper(op.substr(0, op.find('/')));
+        return precedence.count(upper_op) ? precedence.at(upper_op) : 0; 
+    };
 
     for (const auto& token : tokens) {
-        std::string upper = token;
-        std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
-        if (is_operator(upper)) {
-            while (!op_stack.empty() && op_stack.top() != "(" && get_prec(op_stack.top()) >= get_prec(upper)) {
+        if (is_operator(token)) {
+            // Приводим оператор к верхнему регистру для единообразия в RPN
+            std::string upper_token = to_upper(token);
+            
+            while (!op_stack.empty() && op_stack.top() != "(" && get_prec(op_stack.top()) >= get_prec(upper_token)) {
                 rpn.push_back(op_stack.top()); op_stack.pop();
             }
-            op_stack.push(upper);
+            op_stack.push(upper_token);
         } else if (token == "(") {
             op_stack.push(token);
         } else if (token == ")") {
@@ -113,22 +125,20 @@ struct StackItem {
     DocList calculated; 
     const PostingsList* raw = nullptr;
     std::optional<SearchEngine::QueryTerm> origin_term = std::nullopt;
-
-    const DocList& get_vector() const {
-        if (raw) return raw->docs;
-        return calculated;
-    }
+    const DocList& get_vector() const { return raw ? raw->docs : calculated; }
 };
 
 DocList SearchEngine::evaluate_rpn(const Tokens& rpn) const {
     std::stack<StackItem> eval_stack;
-
     for (const auto& token : rpn) {
+        // token в RPN уже будет UPPERCASE, если это оператор (спасибо to_rpn)
         if (is_operator(token)) {
             if (token == "NOT") {
+                if(eval_stack.empty()) return {}; 
                 auto op = eval_stack.top(); eval_stack.pop();
                 eval_stack.push({execute_not(op.get_vector()), nullptr, std::nullopt});
             } else {
+                if(eval_stack.size() < 2) return {}; 
                 auto right = eval_stack.top(); eval_stack.pop();
                 auto left = eval_stack.top(); eval_stack.pop();
 
@@ -141,8 +151,7 @@ DocList SearchEngine::evaluate_rpn(const Tokens& rpn) const {
                     eval_stack.push({std::move(res), nullptr, std::nullopt});
                 } else if (token == "OR") {
                     eval_stack.push({execute_union(left.get_vector(), right.get_vector()), nullptr, std::nullopt});
-                }
-                else if (token.rfind("NEAR", 0) == 0 || token.rfind("ADJ", 0) == 0) {
+                } else if (token.find("NEAR") == 0 || token.find("ADJ") == 0) {
                     DocList res;
                     if (left.origin_term && right.origin_term) {
                         res = execute_prox(token, *left.origin_term, *right.origin_term, left.get_vector(), right.get_vector());
@@ -194,7 +203,6 @@ std::vector<uint32_t> SearchEngine::get_doc_ids(const QueryTerm& q_term) const {
     const auto& inv_index = index_.get_inverted_index();
     auto term_it = inv_index.find(q_term.term);
     if (term_it == inv_index.end()) return {};
-
     if (q_term.field) {
         auto field_it = term_it->second.find(*q_term.field);
         if (field_it != term_it->second.end()) return field_it->second.docs;
@@ -236,10 +244,13 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
         for (const auto& field : fields) {
             if (match) break;
             if (right_term.field && *right_term.field != field) continue;
-            if (!l_fields.count(field) || !r_fields.count(field)) continue;
 
-            const auto& pl_l = l_fields.at(field);
-            const auto& pl_r = r_fields.at(field);
+            auto l_map_it = l_fields.find(field);
+            auto r_map_it = r_fields.find(field);
+            if (l_map_it == l_fields.end() || r_map_it == r_fields.end()) continue;
+
+            auto& pl_l = l_map_it->second;
+            auto& pl_r = r_map_it->second;
 
             auto it_l = std::lower_bound(pl_l.docs.begin(), pl_l.docs.end(), doc_id);
             auto it_r = std::lower_bound(pl_r.docs.begin(), pl_r.docs.end(), doc_id);
@@ -249,6 +260,8 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
 
             size_t idx_l = std::distance(pl_l.docs.begin(), it_l);
             size_t idx_r = std::distance(pl_r.docs.begin(), it_r);
+
+            if (idx_l >= pl_l.positions.size() || idx_r >= pl_r.positions.size()) continue;
 
             const auto& pos_l = pl_l.positions[idx_l];
             const auto& pos_r = pl_r.positions[idx_r];
@@ -277,12 +290,10 @@ DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsLi
     if (!p1 || !p2) return {};
     DocList result;
     if (p1->docs.size() > p2->docs.size()) std::swap(p1, p2);
-
     const auto& small = p1->docs;
     const auto& large = p2->docs;
     const auto& skips = p2->skips;
     size_t step = p2->skip_step;
-
     size_t i = 0, j = 0;
     while (i < small.size() && j < large.size()) {
         if (small[i] == large[j]) {
@@ -301,42 +312,37 @@ DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsLi
     }
     return result;
 }
-
 DocList SearchEngine::execute_intersect_vec(const DocList& small, const PostingsList* large) const {
     if (!large) return {};
     return execute_intersect_vec_vec(small, large->docs);
 }
-
 DocList SearchEngine::execute_intersect_vec_vec(const DocList& l1, const DocList& l2) const {
     DocList result;
     std::set_intersection(l1.begin(), l1.end(), l2.begin(), l2.end(), std::back_inserter(result));
     return result;
 }
-
 DocList SearchEngine::execute_union(const DocList& a, const DocList& b) const {
     DocList result;
     std::set_union(a.begin(), a.end(), b.begin(), b.end(), std::back_inserter(result));
     return result;
 }
-
-// --- ИСПРАВЛЕННАЯ ФУНКЦИЯ EXECUTE_NOT ---
 DocList SearchEngine::execute_not(const DocList& operand) const {
     DocList result;
-    size_t total_docs = index_.get_forward_index().size(); // Используем ForwardIndex
-    
-    // Перебираем все возможные ID документов (они идут от 0 до total_docs-1)
-    for (DocId id = 0; id < total_docs; ++id) {
-        if (!std::binary_search(operand.begin(), operand.end(), id)) {
-            result.push_back(id);
-        }
+    size_t total = index_.get_forward_index().size();
+    for (DocId id = 0; id < total; ++id) {
+        if (!std::binary_search(operand.begin(), operand.end(), id)) result.push_back(id);
     }
     return result;
 }
-// ----------------------------------------
 
+// --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ПРОВЕРКИ ОПЕРАТОРА (Регистронезависимая) ---
 bool SearchEngine::is_operator(const std::string& token) {
-    return token == "AND" || token == "OR" || token == "NOT" || token.rfind("NEAR", 0) == 0 || token.rfind("ADJ", 0) == 0;
+    std::string up = to_upper(token);
+    return up == "AND" || up == "OR" || up == "NOT" || up.find("NEAR") == 0 || up.find("ADJ") == 0;
 }
+
+// --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ПРОВЕРКИ ТЕРМИНА ---
 bool SearchEngine::is_term_like(const std::string& token) {
+    // Если это НЕ оператор и НЕ спецсимвол - значит, это терм
     return !is_operator(token) && token != "(" && token != ")" && token.back() != ':';
 }
