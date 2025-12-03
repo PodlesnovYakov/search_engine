@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 
+// Парсер CSV (тот самый, надежный)
 std::vector<Document> parse_csv(const std::string& filename) {
     std::vector<Document> docs;
     std::ifstream file(filename);
@@ -35,6 +36,7 @@ std::vector<Document> parse_csv(const std::string& filename) {
             record_buffer += c;
         }
     }
+    // Обработка хвоста
     if (!record_buffer.empty()) {
          std::stringstream ss(record_buffer);
             std::vector<std::string> row;
@@ -63,7 +65,10 @@ int main(int argc, char* argv[]) {
     index.build_skip_pointers();
 
     std::cout << "Saving..." << std::endl;
-    index.save("index.bin");
+    // ВАЖНО: Просто "index", без расширения .bin
+    // Класс сам создаст index.docs и index.inv
+    index.save("index"); 
+    
     std::cout << "Done." << std::endl;
     return 0;
 }

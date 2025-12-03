@@ -9,26 +9,7 @@
 
 using json = nlohmann::json;
 
-// Функция для очистки строки от битого UTF-8
-std::string clean_utf8(const std::string& str) {
-    std::string res;
-    res.reserve(str.size());
-    for (size_t i = 0; i < str.size(); ++i) {
-        unsigned char c = static_cast<unsigned char>(str[i]);
-        if (c < 0x80) {
-            res += c; // ASCII
-        } else {
-            // Простейшая защита: пропускаем явно битые байты, если это не начало символа
-            // В идеале тут нужна полноценная библиотека типа ICU, но для домашки хватит
-            // простого копирования. Библиотека nlohmann::json с replace сама справится,
-            // если строка не обрезана посередине символа.
-            res += c;
-        }
-    }
-    return res;
-}
-
-// Безопасная обрезка
+// Безопасная обрезка UTF-8
 std::string utf8_truncate(const std::string& str, size_t len) {
     if (str.length() <= len) return str;
     while (len > 0 && (str[len] & 0xC0) == 0x80) len--;
@@ -39,17 +20,21 @@ int main() {
     Index index;
     std::cout << "Loading index..." << std::endl;
     try {
-        index.load("index.bin");
-    } catch (...) {
-        std::cerr << "Error loading index!" << std::endl;
+        // ВАЖНО: Грузим "index" (он сам найдет .docs и .inv)
+        index.load("index");
+    } catch (const std::exception& e) {
+        std::cerr << "Error loading index: " << e.what() << std::endl;
+        std::cerr << "Run './indexer' first!" << std::endl;
         return 1;
     }
-    std::cout << "Loaded." << std::endl;
+    
+    // Получаем доступ к прямому индексу для статистики
+    const auto& forward_index = index.get_forward_index();
+    std::cout << "Index loaded! Documents: " << forward_index.size() << std::endl;
     
     SearchEngine engine(index);
     httplib::Server svr;
-    
-    // Таймауты
+
     svr.set_read_timeout(5, 0);
     svr.set_write_timeout(5, 0);
 
@@ -59,26 +44,32 @@ int main() {
             std::stringstream buffer;
             buffer << file.rdbuf();
             res.set_content(buffer.str(), "text/html");
-        } else res.set_content("No UI", "text/plain");
+        } else {
+            res.set_content("No UI found", "text/plain");
+        }
     });
 
     svr.Get("/search", [&](const auto& req, auto& res) {
         if (!req.has_param("q")) return;
-        auto q = req.get_param_value("q");
-        std::cout << "Query: " << q << std::endl;
+        
+        std::string query = req.get_param_value("q");
+        std::cout << "Query: " << query << std::endl;
 
         try {
-            auto ids = engine.search(q);
+            // 1. Поиск и ранжирование
+            auto ids = engine.search(query);
             std::cout << "Found: " << ids.size() << std::endl;
 
             json j = json::array();
             size_t cnt = 0;
+            
             for (auto id : ids) {
                 if (cnt++ >= 20) break;
-                // БЕЗОПАСНЫЙ ПОИСК ДОКУМЕНТА
-                auto it = index.get_documents().find(id);
-                if (it != index.get_documents().end()) {
-                    const auto& d = it->second;
+                
+                // ВАЖНО: Используем Forward Index (Прямой индекс)
+                // Это O(1) доступ вместо O(log N) в мапе
+                if (id < forward_index.size()) {
+                    const auto& d = forward_index.get_document(id);
                     
                     std::string safe_title = utf8_truncate(d.title, 100);
                     std::string safe_plot = utf8_truncate(d.plot, 300);
@@ -90,14 +81,16 @@ int main() {
                     });
                 }
             }
-            // ВАЖНО: replace заменяет битые символы на 
             res.set_content(j.dump(-1, ' ', false, json::error_handler_t::replace), "application/json");
+
         } catch (const std::exception& e) {
             std::cerr << "Error: " << e.what() << std::endl;
             res.status = 500;
+            res.set_content(R"({"error": "Internal Server Error"})", "application/json");
         }
     });
 
+    std::cout << "Server started at http://localhost:8080" << std::endl;
     svr.listen("0.0.0.0", 8080);
     return 0;
 }
