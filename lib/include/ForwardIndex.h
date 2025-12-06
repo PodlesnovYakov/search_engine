@@ -9,7 +9,6 @@ class ForwardIndex {
 public:
     void add_document(const Document& doc) {
         docs_.push_back(doc);
-        // Считаем длину (кол-во слов) для BM25. Грубо по пробелам.
         size_t len = 0;
         for (char c : doc.title + doc.plot) { if (std::isspace(c)) len++; }
         doc_lengths_.push_back(len + 1);
@@ -29,12 +28,12 @@ public:
             write_string(out, doc.title);
             write_string(out, doc.plot);
         }
-        write_delta_vector(out, doc_lengths_); // Сжимаем длины
+        write_delta_vector(out, doc_lengths_); 
     }
 
     void load(const std::string& filename) {
         std::ifstream in(filename, std::ios::binary);
-        if(!in.is_open()) return; // Обработка ошибки в вызывающем коде
+        if(!in.is_open()) return;
         size_t count = read_varint(in);
         docs_.clear(); docs_.reserve(count);
         total_length_ = 0;

@@ -10,9 +10,7 @@ using Term = std::string;
 using Tokens = std::vector<Term>;
 using Positions = std::vector<uint32_t>;
 
-// --- VARINT UTILS ---
 
-// Записывает число в сжатом формате (1-5 байт)
 inline void encode_varint(std::ofstream& out, uint32_t value) {
     while (value >= 128) {
         out.put(static_cast<char>((value & 0x7F) | 0x80));
@@ -21,7 +19,6 @@ inline void encode_varint(std::ofstream& out, uint32_t value) {
     out.put(static_cast<char>(value));
 }
 
-// Читает сжатое число
 inline uint32_t decode_varint(std::ifstream& in) {
     uint32_t value = 0;
     int shift = 0;

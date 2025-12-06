@@ -8,22 +8,20 @@
 #include <cmath>
 #include <map>
 #include <iostream>
-#include <cctype> // Для toupper
+#include <cctype>
 
 SearchEngine::SearchEngine(const Index& index) : index_(index), tokenizer_() {}
 
-// Вспомогательная функция: "строку В ВЕРХНИЙ РЕГИСТР"
-std::string to_upper(std::string s) {
+std::string to_upper_str(std::string s) {
     for (char& c : s) c = std::toupper(static_cast<unsigned char>(c));
     return s;
 }
 
-DocList SearchEngine::search(const std::string& query_str, double k1, double b) const {
+DocList SearchEngine::search(const std::string& query_str, double k1, double b, double w_title) const {
     if (query_str.empty()) return {};
     auto tokens = tokenize_query(query_str);
     if (tokens.empty()) return {};
     
-    // Склейка полей (title + : + king -> title:king)
     Tokens processed;
     for(size_t i = 0; i < tokens.size(); ++i) {
         if (i + 1 < tokens.size() && tokens[i+1] == ":") {
@@ -39,10 +37,8 @@ DocList SearchEngine::search(const std::string& query_str, double k1, double b) 
 
     if (results.empty()) return {};
     
-    // РАНЖИРОВАНИЕ
     Tokens scoring_terms;
     for(const auto& t : tokens) {
-        // Используем проверку, не является ли слово оператором (в любом регистре)
         if (is_term_like(t)) {
             auto qt = parse_query_token(t);
             if (!qt.term.empty()) scoring_terms.push_back(qt.term);
@@ -51,7 +47,7 @@ DocList SearchEngine::search(const std::string& query_str, double k1, double b) 
 
     Ranker ranker(index_);
     std::sort(results.begin(), results.end(), [&](DocId a, DocId b) {
-        return ranker.score(a, scoring_terms, k1, b) > ranker.score(b, scoring_terms, k1, b);
+        return ranker.score(a, scoring_terms, k1, b, w_title) > ranker.score(b, scoring_terms, k1, b, w_title);
     });
     
     return results;
@@ -61,9 +57,9 @@ Tokens SearchEngine::tokenize_query(const std::string& s) const {
     Tokens tokens;
     std::string buf;
     for (char ch : s) {
-        if (ch == '(' || ch == ')' || ch == ':' || std::isspace(ch)) {
+        if (ch == '(' || ch == ')' || ch == ':' || std::isspace(static_cast<unsigned char>(ch))) {
             if (!buf.empty()) { tokens.push_back(buf); buf.clear(); }
-            if (!std::isspace(ch)) { tokens.push_back(std::string(1, ch)); }
+            if (!std::isspace(static_cast<unsigned char>(ch))) { tokens.push_back(std::string(1, ch)); }
         } else if (ch != '"') {
             buf += ch;
         }
@@ -77,7 +73,6 @@ Tokens SearchEngine::insert_implicit_and(const Tokens& tokens) const {
     for (size_t i = 0; i < tokens.size(); ++i) {
         result.push_back(tokens[i]);
         if (i + 1 < tokens.size()) {
-            // Вставляем AND только если оба соседа - НЕ операторы
             if (is_term_like(tokens[i]) && is_term_like(tokens[i+1]) && tokens[i].back() != ':') {
                 result.push_back("AND");
             }
@@ -92,20 +87,17 @@ Tokens SearchEngine::to_rpn(const Tokens& tokens) const {
     const std::map<std::string, int> precedence = {{"OR", 1}, {"AND", 2}, {"NEAR", 3}, {"ADJ", 3}, {"NOT", 4}};
     
     auto get_prec = [&](const std::string& op) { 
-        // Берем приоритет по верхнему регистру
-        std::string upper_op = to_upper(op.substr(0, op.find('/')));
-        return precedence.count(upper_op) ? precedence.at(upper_op) : 0; 
+        std::string up = to_upper_str(op.substr(0, op.find('/')));
+        return precedence.count(up) ? precedence.at(up) : 0; 
     };
 
     for (const auto& token : tokens) {
         if (is_operator(token)) {
-            // Приводим оператор к верхнему регистру для единообразия в RPN
-            std::string upper_token = to_upper(token);
-            
-            while (!op_stack.empty() && op_stack.top() != "(" && get_prec(op_stack.top()) >= get_prec(upper_token)) {
+            std::string upper = to_upper_str(token);
+            while (!op_stack.empty() && op_stack.top() != "(" && get_prec(op_stack.top()) >= get_prec(upper)) {
                 rpn.push_back(op_stack.top()); op_stack.pop();
             }
-            op_stack.push(upper_token);
+            op_stack.push(upper);
         } else if (token == "(") {
             op_stack.push(token);
         } else if (token == ")") {
@@ -131,14 +123,13 @@ struct StackItem {
 DocList SearchEngine::evaluate_rpn(const Tokens& rpn) const {
     std::stack<StackItem> eval_stack;
     for (const auto& token : rpn) {
-        // token в RPN уже будет UPPERCASE, если это оператор (спасибо to_rpn)
         if (is_operator(token)) {
             if (token == "NOT") {
-                if(eval_stack.empty()) return {}; 
+                if(eval_stack.empty()) return {};
                 auto op = eval_stack.top(); eval_stack.pop();
                 eval_stack.push({execute_not(op.get_vector()), nullptr, std::nullopt});
             } else {
-                if(eval_stack.size() < 2) return {}; 
+                if(eval_stack.size() < 2) return {};
                 auto right = eval_stack.top(); eval_stack.pop();
                 auto left = eval_stack.top(); eval_stack.pop();
 
@@ -334,15 +325,10 @@ DocList SearchEngine::execute_not(const DocList& operand) const {
     }
     return result;
 }
-
-// --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ПРОВЕРКИ ОПЕРАТОРА (Регистронезависимая) ---
 bool SearchEngine::is_operator(const std::string& token) {
-    std::string up = to_upper(token);
+    std::string up = to_upper_str(token);
     return up == "AND" || up == "OR" || up == "NOT" || up.find("NEAR") == 0 || up.find("ADJ") == 0;
 }
-
-// --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ПРОВЕРКИ ТЕРМИНА ---
 bool SearchEngine::is_term_like(const std::string& token) {
-    // Если это НЕ оператор и НЕ спецсимвол - значит, это терм
     return !is_operator(token) && token != "(" && token != ")" && token.back() != ':';
 }

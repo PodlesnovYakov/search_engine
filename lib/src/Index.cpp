@@ -14,11 +14,9 @@ void Index::add_document(const Document& doc) {
 void Index::add_field_to_index(DocId doc_id, const std::string& field_name, const std::string& text) {
     auto tokens = tokenizer_.tokenize(text);
     std::map<std::string, std::vector<uint32_t>> term_positions;
-    
     for (size_t i = 0; i < tokens.size(); ++i) {
         term_positions[tokens[i]].push_back(i);
     }
-
     for (const auto& [term, positions] : term_positions) {
         auto& list = inverted_index_[term][field_name];
         list.docs.push_back(doc_id);
@@ -29,9 +27,6 @@ void Index::add_field_to_index(DocId doc_id, const std::string& field_name, cons
 void Index::build_skip_pointers() {
     for (auto& [term, fields] : inverted_index_) {
         for (auto& [field, postings] : fields) {
-            // Мы доверяем порядку добавления (doc_id растут).
-            // Сортировать не будем, чтобы не сломать связь с positions.
-            
             if (postings.docs.size() > 4) {
                 postings.skip_step = static_cast<size_t>(std::sqrt(postings.docs.size()));
                 postings.skips.clear();
@@ -56,18 +51,12 @@ void Index::save(const std::string& base_name) const {
         
         for (const auto& [field, postings] : fields_map) {
             write_string(out, field);
-            
-            if (postings.docs.size() != postings.positions.size()) {
-                std::cerr << "CRITICAL: Size mismatch for " << term << std::endl;
-            }
-
             write_delta_vector(out, postings.docs);
-
             write_varint(out, postings.positions.size());
-            for (const auto& pos_vec : postings.positions) {
+            for (auto pos_vec : postings.positions) {
+                std::sort(pos_vec.begin(), pos_vec.end()); 
                 write_delta_vector(out, pos_vec);
             }
-
             std::vector<uint32_t> skip_vec;
             for(auto s : postings.skips) skip_vec.push_back(static_cast<uint32_t>(s));
             write_delta_vector(out, skip_vec);
@@ -81,6 +70,7 @@ void Index::save(const std::string& base_name) const {
 void Index::load(const std::string& base_name) {
     inverted_index_.clear();
     forward_index_.load(base_name + ".docs");
+    size_t total_docs = forward_index_.size();
 
     std::ifstream in(base_name + ".inv", std::ios::binary);
     if (!in.is_open()) throw std::runtime_error("Cannot open .inv file");
@@ -96,9 +86,13 @@ void Index::load(const std::string& base_name) {
         for (size_t j = 0; j < fields_count; ++j) {
             std::string field;
             read_string(in, field);
-            
             PostingsList postings;
+            
             postings.docs = read_delta_vector(in);
+            if (!postings.docs.empty() && postings.docs.back() >= total_docs) {
+                 std::cerr << "CORRUPTION: " << term << " " << postings.docs.back() << std::endl;
+                 postings.docs.clear(); 
+            }
 
             size_t pos_vec_count = read_varint(in);
             postings.positions.reserve(pos_vec_count);
@@ -106,9 +100,9 @@ void Index::load(const std::string& base_name) {
                 postings.positions.push_back(read_delta_vector(in));
             }
 
-            auto skips_vec = read_delta_vector(in);
-            postings.skips.reserve(skips_vec.size());
-            for(auto s : skips_vec) postings.skips.push_back(s);
+            auto skip_vec = read_delta_vector(in);
+            postings.skips.reserve(skip_vec.size());
+            for(auto s : skip_vec) postings.skips.push_back(s);
             
             postings.skip_step = read_varint(in);
 
@@ -117,7 +111,6 @@ void Index::load(const std::string& base_name) {
     }
     if (read_varint(in) != 0xDEADBEEF) throw std::runtime_error("Invalid magic footer");
 }
-
 /*
   Обратный индекс
   "quick": {

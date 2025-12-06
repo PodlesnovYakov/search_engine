@@ -6,7 +6,6 @@
 #include <stdexcept>
 #include <iostream>
 
-// Лимит 200 МБ на вектор (защита от мусора)
 const size_t MAX_BLOCK_SIZE = 200 * 1024 * 1024; 
 
 inline void write_varint(std::ofstream& out, uint64_t value) {
@@ -42,12 +41,14 @@ inline void read_string(std::ifstream& in, std::string& s) {
     if (len > 0) in.read(&s[0], len);
 }
 
-// --- ТЕПЕРЬ ЭТО ПРОСТО СЖАТЫЙ ВЕКТОР (БЕЗ ДЕЛЬТЫ) ---
-// Мы убрали вычитание (val - prev), чтобы избежать переполнений.
 inline void write_delta_vector(std::ofstream& out, const std::vector<uint32_t>& vec) {
     write_varint(out, vec.size());
+    uint64_t prev = 0;
     for (uint32_t val : vec) {
-        write_varint(out, static_cast<uint64_t>(val));
+        if (val < prev) {
+        }
+        write_varint(out, static_cast<uint64_t>(val - prev));
+        prev = val;
     }
 }
 
@@ -57,9 +58,12 @@ inline std::vector<uint32_t> read_delta_vector(std::ifstream& in) {
     
     std::vector<uint32_t> vec;
     vec.reserve(size);
+    uint64_t prev = 0;
     for (size_t i = 0; i < size; ++i) {
-        uint64_t val = read_varint(in);
+        uint64_t delta = read_varint(in);
+        uint64_t val = prev + delta;
         vec.push_back(static_cast<uint32_t>(val));
+        prev = val;
     }
     return vec;
 }

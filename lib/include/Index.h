@@ -2,14 +2,13 @@
 #include "Common.h"
 #include "Document.h"
 #include "Tokenizer.h"
-#include "ForwardIndex.h" // <-- Добавили
+#include "ForwardIndex.h"
 #include <unordered_map>
 #include <vector>
 #include <string>
 
 struct PostingsList {
     DocList docs;
-    // Позиции теперь здесь! Вектор векторов (для сжатия)
     std::vector<std::vector<uint32_t>> positions; 
     std::vector<size_t> skips;
     size_t skip_step = 0;
