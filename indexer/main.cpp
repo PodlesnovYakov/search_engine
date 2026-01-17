@@ -2,7 +2,42 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
-#include <cstdio> // remove
+#include <cstdio>
+#include <vector>
+
+// Нормальный парсер CSV с учетом экранирования ""
+std::vector<std::string> parse_csv_line(const std::string& line) {
+    std::vector<std::string> result;
+    std::string cell;
+    bool in_quotes = false;
+    
+    for (size_t i = 0; i < line.size(); ++i) {
+        char c = line[i];
+        if (in_quotes) {
+            if (c == '"') {
+                if (i + 1 < line.size() && line[i + 1] == '"') {
+                    cell += '"'; // Экранированная кавычка
+                    i++;
+                } else {
+                    in_quotes = false; // Конец кавычек
+                }
+            } else {
+                cell += c;
+            }
+        } else {
+            if (c == '"') {
+                in_quotes = true;
+            } else if (c == ',') {
+                result.push_back(cell);
+                cell.clear();
+            } else {
+                cell += c;
+            }
+        }
+    }
+    result.push_back(cell);
+    return result;
+}
 
 std::vector<Document> parse_csv(const std::string& filename) {
     std::vector<Document> docs;
@@ -11,49 +46,34 @@ std::vector<Document> parse_csv(const std::string& filename) {
 
     std::string line;
     uint32_t id = 0;
-    std::getline(file, line); 
+    
+    // Пропускаем заголовок
+    if (!std::getline(file, line)) return docs;
 
     std::string record_buffer;
     bool in_quotes = false;
-    char c;
+    
+    // Чтение с учетом многострочных полей
+    while (std::getline(file, line)) {
+        if (!record_buffer.empty()) record_buffer += "\n";
+        record_buffer += line;
 
-    while (file.get(c)) {
-        if (c == '"') in_quotes = !in_quotes;
-        if (c == '\n' && !in_quotes) {
-            std::stringstream ss(record_buffer);
-            std::vector<std::string> row;
-            std::string field;
-            bool fq = false;
-            for(char ch : record_buffer) {
-                if (ch == '"') fq = !fq;
-                else if (ch == ',' && !fq) { row.push_back(field); field.clear(); }
-                else field += ch;
+        int quote_count = 0;
+        for (char c : record_buffer) if (c == '"') quote_count++;
+        
+        if (quote_count % 2 == 0) {
+            auto row = parse_csv_line(record_buffer);
+            if (row.size() >= 8) {
+                docs.push_back({id++, row[1], row[7]});
             }
-            row.push_back(field);
-            if (row.size() >= 8) docs.push_back({id++, row[1], row[7]});
             record_buffer.clear();
-        } else {
-            record_buffer += c;
         }
-    }
-    // Хвост
-    if (!record_buffer.empty()) {
-         std::stringstream ss(record_buffer);
-            std::vector<std::string> row;
-            std::string field;
-            bool fq = false;
-            for(char ch : record_buffer) {
-                if (ch == '"') fq = !fq;
-                else if (ch == ',' && !fq) { row.push_back(field); field.clear(); }
-                else field += ch;
-            }
-            row.push_back(field);
-            if (row.size() >= 8) docs.push_back({id++, row[1], row[7]});
     }
     return docs;
 }
 
 int main(int argc, char* argv[]) {
+    // Включаем синхронизацию для вывода, в индексаторе скорость cout не так важна
     std::cout << "Parsing CSV..." << std::endl;
     auto docs = parse_csv("data/wiki_movie_plots_deduped.csv");
     
@@ -61,20 +81,18 @@ int main(int argc, char* argv[]) {
     std::cout << "Indexing " << docs.size() << " docs..." << std::endl;
     for (const auto& doc : docs) index.add_document(doc);
     
-    std::cout << "Building Skip Pointers & Sorting..." << std::endl;
+    std::cout << "Building Skip Pointers..." << std::endl;
     index.build_skip_pointers();
 
     std::cout << "Saving index..." << std::endl;
-    
-    // Удаляем старые файлы, чтобы не было конфликтов
     std::remove("index.docs");
     std::remove("index.inv");
 
     try {
         index.save("index");
-        std::cout << "Done. Index saved successfully." << std::endl;
+        std::cout << "Done." << std::endl;
     } catch (const std::exception& e) {
-        std::cerr << "FATAL ERROR SAVING INDEX: " << e.what() << std::endl;
+        std::cerr << "FATAL: " << e.what() << std::endl;
         return 1;
     }
     return 0;

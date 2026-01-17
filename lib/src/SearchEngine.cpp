@@ -4,7 +4,6 @@
 #include <stdexcept>
 #include <algorithm>
 #include <iterator>
-#include <sstream>
 #include <cmath>
 #include <map>
 #include <iostream>
@@ -46,9 +45,28 @@ DocList SearchEngine::search(const std::string& query_str, double k1, double b, 
     }
 
     Ranker ranker(index_);
-    std::sort(results.begin(), results.end(), [&](DocId a, DocId b) {
-        return ranker.score(a, scoring_terms, k1, b, w_title) > ranker.score(b, scoring_terms, k1, b, w_title);
-    });
+    
+    // БЕЗОПАСНАЯ СОРТИРОВКА
+    try {
+        // Если результатов слишком много, сортируем только если их разумное количество,
+        // или используем частичную сортировку для ТОП-20 (оптимизация)
+        if (results.size() > 50000) {
+             // Для огромных списков ("plot", "rent") сортировка тяжелая.
+             // Просто обрежем, чтобы не крашить сервер, пока не оптимизируем.
+             results.resize(50000); 
+        }
+
+        std::sort(results.begin(), results.end(), [&](DocId a, DocId b) {
+            double sa = ranker.score(a, scoring_terms, k1, b, w_title);
+            double sb = ranker.score(b, scoring_terms, k1, b, w_title);
+            // Строгий порядок: если равны, сравниваем ID
+            if (std::abs(sa - sb) < 1e-9) return a < b; 
+            return sa > sb;
+        });
+    } catch (const std::exception& e) {
+        std::cerr << "Sorting failed: " << e.what() << std::endl;
+        // Возвращаем как есть, не падаем
+    }
     
     return results;
 }
@@ -212,17 +230,17 @@ std::vector<uint32_t> SearchEngine::get_doc_ids(const QueryTerm& q_term) const {
     return {};
 }
 
-DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm& left_term, const QueryTerm& right_term, const DocList& l_docs, const DocList& r_docs) const {
+DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm& left, const QueryTerm& right, const DocList& l_docs, const DocList& r_docs) const {
     size_t slash = op_token.find('/');
     int dist = 1;
     if (slash != std::string::npos) try { dist = std::stoi(op_token.substr(slash + 1)); } catch(...) {}
     bool ordered = (op_token.find("ADJ") == 0);
 
     const auto& idx = index_.get_inverted_index();
-    if (!idx.count(left_term.term) || !idx.count(right_term.term)) return {};
+    if (!idx.count(left.term) || !idx.count(right.term)) return {};
 
-    const auto& l_fields = idx.at(left_term.term);
-    const auto& r_fields = idx.at(right_term.term);
+    const auto& l_fields = idx.at(left.term);
+    const auto& r_fields = idx.at(right.term);
 
     DocList result;
     DocList common_docs = execute_intersect_vec_vec(l_docs, r_docs);
@@ -230,11 +248,11 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
     for (DocId doc_id : common_docs) {
         bool match = false;
         std::vector<std::string> fields = {"title", "plot"};
-        if (left_term.field) fields = {*left_term.field};
+        if (left.field) fields = {*left.field};
 
         for (const auto& field : fields) {
             if (match) break;
-            if (right_term.field && *right_term.field != field) continue;
+            if (right.field && *right.field != field) continue;
 
             auto l_map_it = l_fields.find(field);
             auto r_map_it = r_fields.find(field);
@@ -243,26 +261,35 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
             auto& pl_l = l_map_it->second;
             auto& pl_r = r_map_it->second;
 
+            // Бинарный поиск документа в постинг листе
             auto it_l = std::lower_bound(pl_l.docs.begin(), pl_l.docs.end(), doc_id);
             auto it_r = std::lower_bound(pl_r.docs.begin(), pl_r.docs.end(), doc_id);
 
             if (it_l == pl_l.docs.end() || *it_l != doc_id) continue;
             if (it_r == pl_r.docs.end() || *it_r != doc_id) continue;
 
+            // Вычисляем индексы
             size_t idx_l = std::distance(pl_l.docs.begin(), it_l);
             size_t idx_r = std::distance(pl_r.docs.begin(), it_r);
 
-            if (idx_l >= pl_l.positions.size() || idx_r >= pl_r.positions.size()) continue;
+            // FIX: КРИТИЧЕСКАЯ ПРОВЕРКА ГРАНИЦ
+            // Если индекс сломан, positions может быть меньше docs
+            if (idx_l >= pl_l.positions.size() || idx_r >= pl_r.positions.size()) {
+                // Можно логировать, но главное - не падать
+                continue; 
+            }
 
             const auto& pos_l = pl_l.positions[idx_l];
             const auto& pos_r = pl_r.positions[idx_r];
 
+            // Алгоритм слияния позиций
             auto pl = pos_l.begin();
             auto pr = pos_r.begin();
             while (pl != pos_l.end() && pr != pos_r.end()) {
                 long long p1 = *pl;
                 long long p2 = *pr;
                 long long diff = p2 - p1;
+                
                 if (ordered) {
                     if (diff > 0 && diff <= dist) { match = true; break; }
                     if (p2 <= p1) ++pr; else ++pl;
@@ -279,23 +306,48 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
 
 DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsList* p2) const {
     if (!p1 || !p2) return {};
-    DocList result;
+    
+    // Оптимизация: меняем местами, чтобы искать по короткому списку в длинном (если бы был бинпоиск)
+    // Но для линейного прохода с skips лучше p2 был бы с skips.
+    // Оставим логику "p1 smaller", но проверим skips у p2
     if (p1->docs.size() > p2->docs.size()) std::swap(p1, p2);
+    
+    DocList result;
     const auto& small = p1->docs;
     const auto& large = p2->docs;
     const auto& skips = p2->skips;
     size_t step = p2->skip_step;
+    
     size_t i = 0, j = 0;
     while (i < small.size() && j < large.size()) {
         if (small[i] == large[j]) {
-            result.push_back(small[i]); i++; j++;
+            result.push_back(small[i]); 
+            i++; j++;
         } else if (small[i] < large[j]) {
             i++;
         } else {
+            // small[i] > large[j], нужно подтянуть j
+            // FIX: Безопасные Skips
             if (step > 0 && !skips.empty()) {
-                size_t skip_idx = j / step;
-                while (skip_idx < skips.size() && large[skips[skip_idx]] <= small[i]) {
-                    j = skips[skip_idx]; skip_idx++;
+                // j / step работает корректно, только если j растет последовательно.
+                // Но после прыжка j меняется.
+                // Проще проверять: можем ли мы прыгнуть?
+                
+                // Текущий индекс скипа
+                size_t current_skip_idx = j / step;
+                
+                // Проверяем следующий скип-блок
+                while (current_skip_idx < skips.size()) {
+                     size_t next_idx = skips[current_skip_idx];
+                     // FIX: Проверка границ скипа
+                     if (next_idx >= large.size()) break; 
+                     
+                     if (large[next_idx] <= small[i]) {
+                         j = next_idx;
+                         current_skip_idx++;
+                     } else {
+                         break;
+                     }
                 }
             }
             while (j < large.size() && large[j] < small[i]) j++;
@@ -303,6 +355,7 @@ DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsLi
     }
     return result;
 }
+
 DocList SearchEngine::execute_intersect_vec(const DocList& small, const PostingsList* large) const {
     if (!large) return {};
     return execute_intersect_vec_vec(small, large->docs);

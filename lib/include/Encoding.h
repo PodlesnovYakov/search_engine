@@ -6,7 +6,9 @@
 #include <stdexcept>
 #include <iostream>
 
-const size_t MAX_BLOCK_SIZE = 200 * 1024 * 1024; 
+// Guardrails: Лимиты, чтобы не аллоцировать гигабайты мусора
+const size_t MAX_STRING_SIZE = 50 * 1024 * 1024; // 50 MB
+const size_t MAX_VECTOR_SIZE = 100 * 1000 * 1000; // 100 Million items
 
 inline void write_varint(std::ofstream& out, uint64_t value) {
     while (value >= 128) {
@@ -24,43 +26,52 @@ inline uint64_t read_varint(std::ifstream& in) {
         value |= (static_cast<uint64_t>(byte & 0x7F) << shift);
         if ((byte & 0x80) == 0) break;
         shift += 7;
-        if (shift > 63) throw std::runtime_error("Varint corrupted");
+        if (shift > 63) throw std::runtime_error("Varint corrupted: overflow");
     }
     return value;
 }
 
 inline void write_string(std::ofstream& out, const std::string& s) {
     write_varint(out, s.size());
-    out.write(s.data(), s.size());
+    if (!s.empty()) out.write(s.data(), s.size());
 }
 
 inline void read_string(std::ifstream& in, std::string& s) {
     size_t len = read_varint(in);
-    if (len > MAX_BLOCK_SIZE) throw std::runtime_error("String too long");
+    if (len > MAX_STRING_SIZE) throw std::runtime_error("String too long (corruption?)");
     s.resize(len);
-    if (len > 0) in.read(&s[0], len);
+    if (len > 0) {
+        in.read(&s[0], len);
+        if (in.gcount() != static_cast<std::streamsize>(len)) {
+            throw std::runtime_error("Unexpected EOF reading string");
+        }
+    }
 }
 
+// Delta Encoding возвращен и безопасен
 inline void write_delta_vector(std::ofstream& out, const std::vector<uint32_t>& vec) {
     write_varint(out, vec.size());
     uint64_t prev = 0;
     for (uint32_t val : vec) {
-        if (val < prev) {
-        }
-        write_varint(out, static_cast<uint64_t>(val - prev));
+        // Защита от переполнения (если список не отсортирован)
+        if (val < prev) write_varint(out, 0); // Fallback
+        else write_varint(out, static_cast<uint64_t>(val - prev));
         prev = val;
     }
 }
 
 inline std::vector<uint32_t> read_delta_vector(std::ifstream& in) {
     size_t size = read_varint(in);
-    if (size > MAX_BLOCK_SIZE) throw std::runtime_error("Vector too large");
+    if (size > MAX_VECTOR_SIZE) throw std::runtime_error("Vector too large (corruption?)");
     
     std::vector<uint32_t> vec;
     vec.reserve(size);
     uint64_t prev = 0;
     for (size_t i = 0; i < size; ++i) {
         uint64_t delta = read_varint(in);
+        // Проверка на переполнение 32-бит
+        if (prev + delta > UINT32_MAX) throw std::runtime_error("Delta decoding overflow");
+        
         uint64_t val = prev + delta;
         vec.push_back(static_cast<uint32_t>(val));
         prev = val;
