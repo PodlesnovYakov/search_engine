@@ -16,7 +16,8 @@ std::string to_upper_str(std::string s) {
     return s;
 }
 
-DocList SearchEngine::search(const std::string& query_str, double k1, double b, double w_title) const {
+// UPDATED: добавлен w_prox
+DocList SearchEngine::search(const std::string& query_str, double k1, double b, double w_title, double w_prox) const {
     if (query_str.empty()) return {};
     auto tokens = tokenize_query(query_str);
     if (tokens.empty()) return {};
@@ -44,31 +45,41 @@ DocList SearchEngine::search(const std::string& query_str, double k1, double b, 
         }
     }
 
+    // Дедупликация
+    std::sort(results.begin(), results.end());
+    results.erase(std::unique(results.begin(), results.end()), results.end());
+
+    // Лимит результатов (Safety Cap)
+    if (results.size() > 20000) {
+        results.resize(20000);
+    }
+
     Ranker ranker(index_);
     
-    // БЕЗОПАСНАЯ СОРТИРОВКА
-    try {
-        // Если результатов слишком много, сортируем только если их разумное количество,
-        // или используем частичную сортировку для ТОП-20 (оптимизация)
-        if (results.size() > 50000) {
-             // Для огромных списков ("plot", "rent") сортировка тяжелая.
-             // Просто обрежем, чтобы не крашить сервер, пока не оптимизируем.
-             results.resize(50000); 
-        }
+    std::vector<std::pair<double, DocId>> scored_docs;
+    scored_docs.reserve(results.size());
 
-        std::sort(results.begin(), results.end(), [&](DocId a, DocId b) {
-            double sa = ranker.score(a, scoring_terms, k1, b, w_title);
-            double sb = ranker.score(b, scoring_terms, k1, b, w_title);
-            // Строгий порядок: если равны, сравниваем ID
-            if (std::abs(sa - sb) < 1e-9) return a < b; 
-            return sa > sb;
-        });
-    } catch (const std::exception& e) {
-        std::cerr << "Sorting failed: " << e.what() << std::endl;
-        // Возвращаем как есть, не падаем
+    for (DocId id : results) {
+        // UPDATED: передаем w_prox
+        double s = ranker.score(id, scoring_terms, k1, b, w_title, w_prox);
+        
+        if (std::isfinite(s) && s > 0.0001) { 
+            scored_docs.push_back({s, id});
+        }
+    }
+
+    std::sort(scored_docs.begin(), scored_docs.end(), [](const auto& a, const auto& b) {
+        if (std::abs(a.first - b.first) < 1e-9) return a.second < b.second;
+        return a.first > b.first;
+    });
+
+    DocList final_results;
+    final_results.reserve(scored_docs.size());
+    for (const auto& p : scored_docs) {
+        final_results.push_back(p.second);
     }
     
-    return results;
+    return final_results;
 }
 
 Tokens SearchEngine::tokenize_query(const std::string& s) const {
@@ -261,28 +272,22 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
             auto& pl_l = l_map_it->second;
             auto& pl_r = r_map_it->second;
 
-            // Бинарный поиск документа в постинг листе
             auto it_l = std::lower_bound(pl_l.docs.begin(), pl_l.docs.end(), doc_id);
             auto it_r = std::lower_bound(pl_r.docs.begin(), pl_r.docs.end(), doc_id);
 
             if (it_l == pl_l.docs.end() || *it_l != doc_id) continue;
             if (it_r == pl_r.docs.end() || *it_r != doc_id) continue;
 
-            // Вычисляем индексы
             size_t idx_l = std::distance(pl_l.docs.begin(), it_l);
             size_t idx_r = std::distance(pl_r.docs.begin(), it_r);
 
-            // FIX: КРИТИЧЕСКАЯ ПРОВЕРКА ГРАНИЦ
-            // Если индекс сломан, positions может быть меньше docs
             if (idx_l >= pl_l.positions.size() || idx_r >= pl_r.positions.size()) {
-                // Можно логировать, но главное - не падать
                 continue; 
             }
 
             const auto& pos_l = pl_l.positions[idx_l];
             const auto& pos_r = pl_r.positions[idx_r];
 
-            // Алгоритм слияния позиций
             auto pl = pos_l.begin();
             auto pr = pos_r.begin();
             while (pl != pos_l.end() && pr != pos_r.end()) {
@@ -307,9 +312,6 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
 DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsList* p2) const {
     if (!p1 || !p2) return {};
     
-    // Оптимизация: меняем местами, чтобы искать по короткому списку в длинном (если бы был бинпоиск)
-    // Но для линейного прохода с skips лучше p2 был бы с skips.
-    // Оставим логику "p1 smaller", но проверим skips у p2
     if (p1->docs.size() > p2->docs.size()) std::swap(p1, p2);
     
     DocList result;
@@ -326,20 +328,10 @@ DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsLi
         } else if (small[i] < large[j]) {
             i++;
         } else {
-            // small[i] > large[j], нужно подтянуть j
-            // FIX: Безопасные Skips
             if (step > 0 && !skips.empty()) {
-                // j / step работает корректно, только если j растет последовательно.
-                // Но после прыжка j меняется.
-                // Проще проверять: можем ли мы прыгнуть?
-                
-                // Текущий индекс скипа
                 size_t current_skip_idx = j / step;
-                
-                // Проверяем следующий скип-блок
                 while (current_skip_idx < skips.size()) {
                      size_t next_idx = skips[current_skip_idx];
-                     // FIX: Проверка границ скипа
                      if (next_idx >= large.size()) break; 
                      
                      if (large[next_idx] <= small[i]) {

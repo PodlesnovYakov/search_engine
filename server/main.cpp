@@ -52,17 +52,26 @@ int main() {
         } else res.set_content("No UI found", "text/html");
     });
 
+    // ... внутри svr.Get("/search" ...
+    
     svr.Get("/search", [&](const auto& req, auto& res) {
         if (!req.has_param("q")) return;
         std::string query = req.get_param_value("q");
         
         double k1 = 1.2, b = 0.75, w_title = 5.0;
+        double w_prox = 1.0; // Новая переменная
+
         if (req.has_param("k1")) try { k1 = std::stod(req.get_param_value("k1")); } catch(...) {}
         if (req.has_param("b")) try { b = std::stod(req.get_param_value("b")); } catch(...) {}
         if (req.has_param("w_title")) try { w_title = std::stod(req.get_param_value("w_title")); } catch(...) {}
+        // Читаем w_prox
+        if (req.has_param("w_prox")) try { w_prox = std::stod(req.get_param_value("w_prox")); } catch(...) {}
 
         try {
-            auto ids = engine.search(query, k1, b, w_title);
+            // Передаем новый параметр в поиск
+            auto ids = engine.search(query, k1, b, w_title, w_prox);
+            
+            // ... дальше формирование JSON без изменений ...
             
             json j = json::array();
             size_t cnt = 0;

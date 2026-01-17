@@ -7,15 +7,18 @@
 
 class SearchEngine {
 public:
-    explicit SearchEngine(const Index& index);//добавить проксимити
-    DocList search(const std::string& query_str, double k1 = 1.2, double b = 0.75, double w_title = 5.0) const;
+    explicit SearchEngine(const Index& index);
+    
+    // UPDATED: добавлен w_prox
+    DocList search(const std::string& query_str, double k1 = 1.2, double b = 0.75, double w_title = 5.0, double w_prox = 1.0) const;
 
+// ... (остальное без изменений) ...
     struct QueryTerm {
         Term term;
         std::optional<std::string> field;
     };
-
 private:
+// ... (все приватные методы без изменений, как в прошлом коде) ...
     Tokens tokenize_query(const std::string& s) const;
     Tokens insert_implicit_and(const Tokens& tokens) const;
     Tokens to_rpn(const Tokens& tokens) const;

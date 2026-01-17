@@ -62,20 +62,23 @@ def train():
 
     w_title_values = [1.0, 5.0, 10.0] 
     k1_values = [1.2, 1.5, 2.0]            
-    b_values = [0.4, 0.75, 1.0]            
+    b_values = [0.4, 0.75, 1.0]   
+    w_prox_values = [0.0, 1.0, 5.0]       
+     
 
-    print(f"{'w_title':<8} | {'k1':<6} | {'b':<6} | {'Accuracy':<10}")
+    print(f"{'w_title':<8} | {'k1':<6} | {'b':<6} | {'w_prox':<6} | {'Accuracy':<10}")
     print("-" * 40)
 
     for w in w_title_values:
         for k1 in k1_values:
             for b in b_values:
-                score = evaluate(sample, k1, b, w)
-                print(f"{w:<8.1f} | {k1:<6.1f} | {b:<6.2f} | {score:.1f}%")
-                
-                if score > best_score:
-                    best_score = score
-                    best_params = (w, k1, b)
+                for w_prox in w_prox_values: 
+                    score = evaluate(sample, k1, b, w)
+                    print(f"{w:<8.1f} | {k1:<6.1f} | {b:<6.2f} | {w_prox:<6} | {score:.1f}%")
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_params = (w, k1, b)
 
     print("-" * 40)
     print(f"BEST RESULT: Accuracy {best_score:.1f}%")
