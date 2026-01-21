@@ -8,7 +8,6 @@
 
 using json = nlohmann::json;
 
-// Безопасная функция обрезки UTF-8
 std::string utf8_truncate(const std::string& str, size_t max_len) {
     if (str.size() <= max_len) return str;
     std::string res = str.substr(0, max_len);
@@ -19,7 +18,6 @@ std::string utf8_truncate(const std::string& str, size_t max_len) {
 }
 
 int main() {
-    // Отключаем синхронизацию для скорости
     std::ios::sync_with_stdio(false);
 
     Index index;
@@ -37,7 +35,6 @@ int main() {
     SearchEngine engine(index);
     httplib::Server svr;
     
-    // ВАЖНО: Принудительно ставим 1 поток, чтобы исключить Race Conditions
     svr.new_task_queue = [] { return new httplib::ThreadPool(1); };
 
     svr.set_read_timeout(10, 0);
@@ -52,34 +49,26 @@ int main() {
         } else res.set_content("No UI found", "text/html");
     });
 
-    // ... внутри svr.Get("/search" ...
     
     svr.Get("/search", [&](const auto& req, auto& res) {
         if (!req.has_param("q")) return;
         std::string query = req.get_param_value("q");
         
         double k1 = 1.2, b = 0.75, w_title = 5.0;
-        double w_prox = 1.0; // Новая переменная
-
+        double w_prox = 1.0;
         if (req.has_param("k1")) try { k1 = std::stod(req.get_param_value("k1")); } catch(...) {}
         if (req.has_param("b")) try { b = std::stod(req.get_param_value("b")); } catch(...) {}
         if (req.has_param("w_title")) try { w_title = std::stod(req.get_param_value("w_title")); } catch(...) {}
-        // Читаем w_prox
         if (req.has_param("w_prox")) try { w_prox = std::stod(req.get_param_value("w_prox")); } catch(...) {}
 
         try {
-            // Передаем новый параметр в поиск
             auto ids = engine.search(query, k1, b, w_title, w_prox);
-            
-            // ... дальше формирование JSON без изменений ...
-            
             json j = json::array();
             size_t cnt = 0;
             for (auto id : ids) {
                 if (cnt++ >= 20) break;
                 if (id < forward_index.size()) {
                     const auto& d = forward_index.get_document(id);
-                    // Копируем строки с защитой
                     std::string title_safe = d.title; 
                     std::string snippet_safe = utf8_truncate(d.plot, 300) + "...";
                     

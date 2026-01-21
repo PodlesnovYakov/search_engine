@@ -8,6 +8,7 @@
 #include <map>
 #include <iostream>
 #include <cctype>
+#include <numeric>
 
 SearchEngine::SearchEngine(const Index& index) : index_(index), tokenizer_() {}
 
@@ -15,54 +16,144 @@ std::string to_upper_str(std::string s) {
     for (char& c : s) c = std::toupper(static_cast<unsigned char>(c));
     return s;
 }
-
-// UPDATED: добавлен w_prox
-DocList SearchEngine::search(const std::string& query_str, double k1, double b, double w_title, double w_prox) const {
-    if (query_str.empty()) return {};
-    auto tokens = tokenize_query(query_str);
-    if (tokens.empty()) return {};
+bool SearchEngine::is_collocation(const std::string& term1, const std::string& term2) const {
+    auto q1 = parse_query_token(term1);
+    auto q2 = parse_query_token(term2);
     
-    Tokens processed;
-    for(size_t i = 0; i < tokens.size(); ++i) {
-        if (i + 1 < tokens.size() && tokens[i+1] == ":") {
-            processed.push_back(tokens[i] + tokens[i+1] + (i + 2 < tokens.size() ? tokens[i+2] : ""));
-            i += 2; 
-        } else {
-            processed.push_back(tokens[i]);
+    const PostingsList* p1 = get_postings(q1);
+    const PostingsList* p2 = get_postings(q2);
+    if (!p1 || !p2 || p1->docs.empty() || p2->docs.empty()) return false;
+    if (p1->docs.size() < 3 || p2->docs.size() < 3) return false;
+    DocList intersection = execute_intersect(p1, p2);
+
+    if (intersection.empty()) return false;
+
+    double count1 = static_cast<double>(p1->docs.size());
+    double count2 = static_cast<double>(p2->docs.size());
+    double count_both = static_cast<double>(intersection.size());
+    double ratio = count_both / std::min(count1, count2);
+
+    return ratio > 0.3;
+}
+
+std::string SearchEngine::build_smart_query(const Tokens& raw_tokens) const {
+    std::vector<std::string> base_terms;
+    for (const auto& t : raw_tokens) {
+        if (is_term_like(t)) base_terms.push_back(t);
+    }
+
+    if (base_terms.empty()) return "";
+    std::vector<std::string> glued_terms;
+    size_t i = 0;
+    while (i < base_terms.size()) {
+        bool glued = false;
+        if (i + 1 < base_terms.size()) {
+            if (is_collocation(base_terms[i], base_terms[i+1])) {
+                std::string phrase = "(" + base_terms[i] + " AND " + base_terms[i+1] + ")";
+                glued_terms.push_back(phrase);
+                i += 2;
+                glued = true;
+            }
+        }
+        
+        if (!glued) {
+            glued_terms.push_back(base_terms[i]);
+            i++;
         }
     }
 
-    processed = insert_implicit_and(processed);
-    DocList results = evaluate_rpn(to_rpn(processed));
+    size_t n = glued_terms.size();
+    size_t k = n; 
+
+    if (n <= 2) {
+        k = n; 
+    } else if (n <= 4) {
+        k = n - 1; 
+    } else {
+        k = static_cast<size_t>(std::ceil(n * 0.7)); 
+    }
+
+    if (k == n) {
+        std::string query;
+        for (size_t j = 0; j < n; ++j) {
+            query += glued_terms[j];
+            if (j < n - 1) query += " AND ";
+        }
+        return query;
+    }
+    std::vector<bool> v(n);
+    std::fill(v.begin(), v.begin() + k, true);
+    std::fill(v.begin() + k, v.end(), false);
+    std::sort(v.begin(), v.end());
+
+    std::string big_query;
+    bool first_block = true;
+    int combinations_count = 0;
+    const int MAX_COMBINATIONS = 50; 
+
+    do {
+        std::string sub_query = "(";
+        bool first_term = true;
+        for (size_t j = 0; j < n; ++j) {
+            if (v[j]) {
+                if (!first_term) sub_query += " AND ";
+                sub_query += glued_terms[j];
+                first_term = false;
+            }
+        }
+        sub_query += ")";
+
+        if (!first_block) big_query += " OR ";
+        big_query += sub_query;
+        first_block = false;
+
+        if (++combinations_count >= MAX_COMBINATIONS) break;
+
+    } while (std::next_permutation(v.begin(), v.end()));
+
+    return big_query;
+}
+
+DocList SearchEngine::search(const std::string& query_str, double k1, double b, double w_title, double w_prox) const {
+    if (query_str.empty()) return {};
+
+    auto initial_tokens = tokenize_query(query_str);
+    if (initial_tokens.empty()) return {};
+    bool has_explicit_operators = false;
+    for (const auto& t : initial_tokens) {
+        if (is_operator(t) || t == "(" || t == ")") {
+            has_explicit_operators = true;
+            break;
+        }
+    }
+
+    DocList results;
+
+    if (has_explicit_operators) {
+        results = evaluate_rpn(to_rpn(initial_tokens));
+    } else {
+        std::string smart_query_str = build_smart_query(initial_tokens);
+        auto tokens = tokenize_query(smart_query_str);
+        results = evaluate_rpn(to_rpn(tokens));
+    }
 
     if (results.empty()) return {};
-    
     Tokens scoring_terms;
-    for(const auto& t : tokens) {
+    for(const auto& t : initial_tokens) {
         if (is_term_like(t)) {
             auto qt = parse_query_token(t);
             if (!qt.term.empty()) scoring_terms.push_back(qt.term);
         }
     }
-
-    // Дедупликация
     std::sort(results.begin(), results.end());
     results.erase(std::unique(results.begin(), results.end()), results.end());
-
-    // Лимит результатов (Safety Cap)
-    if (results.size() > 20000) {
-        results.resize(20000);
-    }
-
+    if (results.size() > 20000) results.resize(20000);
     Ranker ranker(index_);
-    
     std::vector<std::pair<double, DocId>> scored_docs;
     scored_docs.reserve(results.size());
 
     for (DocId id : results) {
-        // UPDATED: передаем w_prox
         double s = ranker.score(id, scoring_terms, k1, b, w_title, w_prox);
-        
         if (std::isfinite(s) && s > 0.0001) { 
             scored_docs.push_back({s, id});
         }
@@ -82,13 +173,14 @@ DocList SearchEngine::search(const std::string& query_str, double k1, double b, 
     return final_results;
 }
 
+
 Tokens SearchEngine::tokenize_query(const std::string& s) const {
     Tokens tokens;
     std::string buf;
     for (char ch : s) {
-        if (ch == '(' || ch == ')' || ch == ':' || std::isspace(static_cast<unsigned char>(ch))) {
+        if (ch == '(' || ch == ')' || std::isspace(static_cast<unsigned char>(ch))) {
             if (!buf.empty()) { tokens.push_back(buf); buf.clear(); }
-            if (!std::isspace(static_cast<unsigned char>(ch))) { tokens.push_back(std::string(1, ch)); }
+            if (ch == '(' || ch == ')') { tokens.push_back(std::string(1, ch)); }
         } else if (ch != '"') {
             buf += ch;
         }
@@ -281,9 +373,7 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
             size_t idx_l = std::distance(pl_l.docs.begin(), it_l);
             size_t idx_r = std::distance(pl_r.docs.begin(), it_r);
 
-            if (idx_l >= pl_l.positions.size() || idx_r >= pl_r.positions.size()) {
-                continue; 
-            }
+            if (idx_l >= pl_l.positions.size() || idx_r >= pl_r.positions.size()) continue;
 
             const auto& pos_l = pl_l.positions[idx_l];
             const auto& pos_r = pl_r.positions[idx_r];
@@ -294,7 +384,6 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
                 long long p1 = *pl;
                 long long p2 = *pr;
                 long long diff = p2 - p1;
-                
                 if (ordered) {
                     if (diff > 0 && diff <= dist) { match = true; break; }
                     if (p2 <= p1) ++pr; else ++pl;
@@ -311,20 +400,16 @@ DocList SearchEngine::execute_prox(const std::string& op_token, const QueryTerm&
 
 DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsList* p2) const {
     if (!p1 || !p2) return {};
-    
     if (p1->docs.size() > p2->docs.size()) std::swap(p1, p2);
-    
     DocList result;
     const auto& small = p1->docs;
     const auto& large = p2->docs;
     const auto& skips = p2->skips;
     size_t step = p2->skip_step;
-    
     size_t i = 0, j = 0;
     while (i < small.size() && j < large.size()) {
         if (small[i] == large[j]) {
-            result.push_back(small[i]); 
-            i++; j++;
+            result.push_back(small[i]); i++; j++;
         } else if (small[i] < large[j]) {
             i++;
         } else {
@@ -333,13 +418,9 @@ DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsLi
                 while (current_skip_idx < skips.size()) {
                      size_t next_idx = skips[current_skip_idx];
                      if (next_idx >= large.size()) break; 
-                     
                      if (large[next_idx] <= small[i]) {
-                         j = next_idx;
-                         current_skip_idx++;
-                     } else {
-                         break;
-                     }
+                         j = next_idx; current_skip_idx++;
+                     } else { break; }
                 }
             }
             while (j < large.size() && large[j] < small[i]) j++;
@@ -347,7 +428,6 @@ DocList SearchEngine::execute_intersect(const PostingsList* p1, const PostingsLi
     }
     return result;
 }
-
 DocList SearchEngine::execute_intersect_vec(const DocList& small, const PostingsList* large) const {
     if (!large) return {};
     return execute_intersect_vec_vec(small, large->docs);

@@ -29,10 +29,9 @@ void Index::add_field_to_index(DocId doc_id, const std::string& field_name, cons
 void Index::build_skip_pointers() {
     for (auto& [term, fields] : inverted_index_) {
         for (auto& [field, postings] : fields) {
-            if (postings.docs.size() > 16) { // Чуть увеличим порог
+            if (postings.docs.size() > 16) {
                 postings.skip_step = static_cast<size_t>(std::sqrt(postings.docs.size()));
                 postings.skips.clear();
-                // Храним ИНДЕКСЫ, а не DocID, чтобы прыгать по вектору
                 for (size_t i = postings.skip_step; i < postings.docs.size(); i += postings.skip_step) {
                     postings.skips.push_back(i);
                 }
@@ -57,24 +56,15 @@ void Index::save(const std::string& base_name) const {
         write_string(out, term);
         write_varint(out, fields_map.size());
         
-        for (auto [field, postings] : fields_map) { // Копия, т.к. будем сортировать
+        for (auto [field, postings] : fields_map) {
             write_string(out, field);
-            
-            // ВАЖНО: Гарантируем сортировку для Delta Encoding
-            // Обычно docs добавляются по порядку, но перестрахуемся
-            // Если сортируем docs, надо синхронно сортировать positions.
-            // Но это дорого. Предполагаем, что add_document вызывался последовательно.
-            // Простая проверка:
             if (!std::is_sorted(postings.docs.begin(), postings.docs.end())) {
-               // Если не отсортировано - Delta сломается. 
-               // В рамках этой задачи считаем, что Indexer однопоточный и ID растут.
             }
 
             write_delta_vector(out, postings.docs);
             
             write_varint(out, postings.positions.size());
             for (auto& pos_vec : postings.positions) {
-                // Позиции внутри документа всегда сортируем для дельты
                 std::sort(pos_vec.begin(), pos_vec.end()); 
                 write_delta_vector(out, pos_vec);
             }
@@ -92,7 +82,6 @@ void Index::save(const std::string& base_name) const {
 void Index::load(const std::string& base_name) {
     inverted_index_.clear();
     forward_index_.load(base_name + ".docs");
-    // size_t total_docs = forward_index_.size(); // Не используем для валидации, т.к. ID могут быть > size
 
     std::ifstream in(base_name + ".inv", std::ios::binary);
     if (!in.is_open()) throw std::runtime_error("Cannot open .inv file");
@@ -113,16 +102,13 @@ void Index::load(const std::string& base_name) {
             postings.docs = read_delta_vector(in);
 
             size_t pos_vec_count = read_varint(in);
-            
-            // VALIDATION: Если размеры не совпадают, файл битый
             if (pos_vec_count != postings.docs.size()) {
                 std::cerr << "CORRUPTION detected for term '" << term << "': docs=" 
                           << postings.docs.size() << ", pos=" << pos_vec_count << ". Clearing." << std::endl;
-                // Читаем, чтобы промотать поток, но не сохраняем мусор
                 for(size_t k=0; k<pos_vec_count; ++k) read_delta_vector(in);
-                read_delta_vector(in); // skips
-                read_varint(in); // step
-                continue; // Пропускаем этот field
+                read_delta_vector(in);
+                read_varint(in);
+                continue;
             }
 
             postings.positions.reserve(pos_vec_count);
@@ -132,7 +118,6 @@ void Index::load(const std::string& base_name) {
 
             auto skip_vec = read_delta_vector(in);
             for(auto s : skip_vec) {
-                // VALIDATION: Скипы должны быть валидными индексами
                 if (s < postings.docs.size()) postings.skips.push_back(s);
             }
             

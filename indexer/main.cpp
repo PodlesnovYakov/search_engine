@@ -5,7 +5,6 @@
 #include <cstdio>
 #include <vector>
 
-// Нормальный парсер CSV с учетом экранирования ""
 std::vector<std::string> parse_csv_line(const std::string& line) {
     std::vector<std::string> result;
     std::string cell;
@@ -16,10 +15,10 @@ std::vector<std::string> parse_csv_line(const std::string& line) {
         if (in_quotes) {
             if (c == '"') {
                 if (i + 1 < line.size() && line[i + 1] == '"') {
-                    cell += '"'; // Экранированная кавычка
+                    cell += '"';
                     i++;
                 } else {
-                    in_quotes = false; // Конец кавычек
+                    in_quotes = false;
                 }
             } else {
                 cell += c;
@@ -46,14 +45,12 @@ std::vector<Document> parse_csv(const std::string& filename) {
 
     std::string line;
     uint32_t id = 0;
-    
-    // Пропускаем заголовок
+
     if (!std::getline(file, line)) return docs;
 
     std::string record_buffer;
     bool in_quotes = false;
-    
-    // Чтение с учетом многострочных полей
+
     while (std::getline(file, line)) {
         if (!record_buffer.empty()) record_buffer += "\n";
         record_buffer += line;
@@ -73,7 +70,6 @@ std::vector<Document> parse_csv(const std::string& filename) {
 }
 
 int main(int argc, char* argv[]) {
-    // Включаем синхронизацию для вывода, в индексаторе скорость cout не так важна
     std::cout << "Parsing CSV..." << std::endl;
     auto docs = parse_csv("data/wiki_movie_plots_deduped.csv");
     

@@ -9,19 +9,20 @@ class SearchEngine {
 public:
     explicit SearchEngine(const Index& index);
     
-    // UPDATED: добавлен w_prox
     DocList search(const std::string& query_str, double k1 = 1.2, double b = 0.75, double w_title = 5.0, double w_prox = 1.0) const;
 
-// ... (остальное без изменений) ...
     struct QueryTerm {
         Term term;
         std::optional<std::string> field;
     };
+
 private:
-// ... (все приватные методы без изменений, как в прошлом коде) ...
     Tokens tokenize_query(const std::string& s) const;
+    bool is_collocation(const std::string& term1, const std::string& term2) const;
+
+    std::string build_smart_query(const Tokens& raw_tokens) const;
     Tokens insert_implicit_and(const Tokens& tokens) const;
-    Tokens to_rpn(const Tokens& tokens) const;
+    Tokens to_rpn(const Tokens& tokens) const; 
     DocList evaluate_rpn(const Tokens& rpn) const;
 
     const PostingsList* get_postings(const QueryTerm& q_term) const;

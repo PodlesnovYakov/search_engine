@@ -6,9 +6,8 @@
 #include <stdexcept>
 #include <iostream>
 
-// Guardrails: Лимиты, чтобы не аллоцировать гигабайты мусора
-const size_t MAX_STRING_SIZE = 50 * 1024 * 1024; // 50 MB
-const size_t MAX_VECTOR_SIZE = 100 * 1000 * 1000; // 100 Million items
+const size_t MAX_STRING_SIZE = 50 * 1024 * 1024;
+const size_t MAX_VECTOR_SIZE = 100 * 1000 * 1000;
 
 inline void write_varint(std::ofstream& out, uint64_t value) {
     while (value >= 128) {
@@ -48,13 +47,11 @@ inline void read_string(std::ifstream& in, std::string& s) {
     }
 }
 
-// Delta Encoding возвращен и безопасен
 inline void write_delta_vector(std::ofstream& out, const std::vector<uint32_t>& vec) {
     write_varint(out, vec.size());
     uint64_t prev = 0;
     for (uint32_t val : vec) {
-        // Защита от переполнения (если список не отсортирован)
-        if (val < prev) write_varint(out, 0); // Fallback
+        if (val < prev) write_varint(out, 0);
         else write_varint(out, static_cast<uint64_t>(val - prev));
         prev = val;
     }
@@ -69,7 +66,6 @@ inline std::vector<uint32_t> read_delta_vector(std::ifstream& in) {
     uint64_t prev = 0;
     for (size_t i = 0; i < size; ++i) {
         uint64_t delta = read_varint(in);
-        // Проверка на переполнение 32-бит
         if (prev + delta > UINT32_MAX) throw std::runtime_error("Delta decoding overflow");
         
         uint64_t val = prev + delta;
